@@ -1,0 +1,12 @@
+{
+  "name": "lifehub-notifications",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "generate-vapid": "node scripts/generate-vapid.js"
+  },
+  "dependencies": {
+    "web-push": "^3.6.7",
+    "@vercel/kv": "^2.0.0"
+  }
+}
