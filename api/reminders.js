@@ -54,13 +54,18 @@ module.exports = async function handler(req, res) {
       }
 
       // Create new schedules for enabled reminders
+      // Convert local time to UTC (offset from env var, default 0)
+      var tzOffset = Number(process.env.TZ_OFFSET || 0);
       var created = 0;
       for (const r of reminders) {
         if (!r.enabled) continue;
         try {
+          var utcHour = r.hour - tzOffset;
+          if (utcHour < 0) utcHour += 24;
+          if (utcHour >= 24) utcHour -= 24;
           await qstash.schedules.create({
             destination: baseUrl + '/api/send-one',
-            cron: r.minute + ' ' + r.hour + ' * * *',
+            cron: r.minute + ' ' + utcHour + ' * * *',
             body: JSON.stringify({
               userId: userId,
               label: r.label,
