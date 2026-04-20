@@ -28,9 +28,7 @@ module.exports = async function handler(req, res) {
 
       // Sync QStash schedules
       const qstash = new Client({ token: process.env.QSTASH_TOKEN });
-      const baseUrl = process.env.VERCEL_URL
-        ? 'https://' + process.env.VERCEL_URL
-        : process.env.APP_URL || '';
+      const baseUrl = process.env.APP_URL || (process.env.VERCEL_URL ? 'https://' + process.env.VERCEL_URL : '');
 
       if (!baseUrl) {
         return res.status(200).json({ ok: true, schedules: 'skipped - no APP_URL' });
