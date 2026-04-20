@@ -1,4 +1,4 @@
-const { kv } = require('@vercel/kv');
+const { Redis } = require('@upstash/redis');
 const webpush = require('web-push');
 
 webpush.setVapidDetails(
@@ -8,17 +8,17 @@ webpush.setVapidDetails(
 );
 
 module.exports = async function handler(req, res) {
-  // Vercel cron sends a GET request
   try {
+    const redis = new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN });
     const now = new Date();
     const hour = now.getHours();
     const minute = now.getMinutes();
 
-    // Get all user keys
+    // Scan for all reminder keys
     const keys = [];
     let cursor = 0;
     do {
-      const result = await kv.scan(cursor, { match: 'reminders:*', count: 100 });
+      const result = await redis.scan(cursor, { match: 'reminders:*', count: 100 });
       cursor = result[0];
       keys.push(...result[1]);
     } while (cursor !== 0);
@@ -27,11 +27,11 @@ module.exports = async function handler(req, res) {
 
     for (const key of keys) {
       const userId = key.replace('reminders:', '');
-      const remindersRaw = await kv.get(key);
+      const remindersRaw = await redis.get(key);
       if (!remindersRaw) continue;
 
       const reminders = typeof remindersRaw === 'string' ? JSON.parse(remindersRaw) : remindersRaw;
-      const subRaw = await kv.get(`sub:${userId}`);
+      const subRaw = await redis.get(`sub:${userId}`);
       if (!subRaw) continue;
 
       const subscription = typeof subRaw === 'string' ? JSON.parse(subRaw) : subRaw;
@@ -40,10 +40,9 @@ module.exports = async function handler(req, res) {
         if (!r.enabled) continue;
         if (r.hour !== hour || r.minute !== minute) continue;
 
-        // Check if already sent today
         const today = now.toISOString().slice(0, 10);
         const firedKey = `fired:${userId}:${r.id}:${today}`;
-        const alreadyFired = await kv.get(firedKey);
+        const alreadyFired = await redis.get(firedKey);
         if (alreadyFired) continue;
 
         try {
@@ -52,14 +51,12 @@ module.exports = async function handler(req, res) {
             body: r.message,
             icon: '/icon-192.png'
           }));
-          // Mark as fired for today (expires in 24h)
-          await kv.set(firedKey, '1', { ex: 86400 });
+          await redis.set(firedKey, '1', { ex: 86400 });
           sent++;
         } catch (pushErr) {
           console.error('Push failed for', userId, r.id, pushErr.statusCode || pushErr.message);
-          // If subscription is invalid (410 Gone), clean it up
           if (pushErr.statusCode === 410 || pushErr.statusCode === 404) {
-            await kv.del(`sub:${userId}`);
+            await redis.del(`sub:${userId}`);
           }
         }
       }
