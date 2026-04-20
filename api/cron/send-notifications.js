@@ -38,7 +38,7 @@ module.exports = async function handler(req, res) {
 
       for (const r of reminders) {
         if (!r.enabled) continue;
-        if (r.hour !== hour || r.minute !== minute) continue;
+        if (r.hour !== hour) continue;
 
         const today = now.toISOString().slice(0, 10);
         const firedKey = `fired:${userId}:${r.id}:${today}`;
