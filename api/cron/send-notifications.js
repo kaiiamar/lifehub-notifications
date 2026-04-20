@@ -10,9 +10,7 @@ webpush.setVapidDetails(
 module.exports = async function handler(req, res) {
   try {
     const redis = new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN });
-    const now = new Date();
-    const hour = now.getHours();
-    const minute = now.getMinutes();
+    const today = new Date().toISOString().slice(0, 10);
 
     // Scan for all reminder keys
     const keys = [];
@@ -35,29 +33,30 @@ module.exports = async function handler(req, res) {
       if (!subRaw) continue;
 
       const subscription = typeof subRaw === 'string' ? JSON.parse(subRaw) : subRaw;
+      const enabled = reminders.filter(function(r) { return r.enabled; });
+      if (!enabled.length) continue;
 
-      for (const r of reminders) {
-        if (!r.enabled) continue;
-        if (r.hour !== hour) continue;
+      // Send a single daily summary notification
+      const firedKey = `fired:${userId}:daily:${today}`;
+      const alreadyFired = await redis.get(firedKey);
+      if (alreadyFired) continue;
 
-        const today = now.toISOString().slice(0, 10);
-        const firedKey = `fired:${userId}:${r.id}:${today}`;
-        const alreadyFired = await redis.get(firedKey);
-        if (alreadyFired) continue;
+      const lines = enabled.map(function(r) {
+        return r.emoji + ' ' + r.label + ' (' + (r.hour < 10 ? '0' : '') + r.hour + ':' + (r.minute < 10 ? '0' : '') + r.minute + ')';
+      });
 
-        try {
-          await webpush.sendNotification(subscription, JSON.stringify({
-            title: r.emoji + ' ' + r.label,
-            body: r.message,
-            icon: '/icon-192.png'
-          }));
-          await redis.set(firedKey, '1', { ex: 86400 });
-          sent++;
-        } catch (pushErr) {
-          console.error('Push failed for', userId, r.id, pushErr.statusCode || pushErr.message);
-          if (pushErr.statusCode === 410 || pushErr.statusCode === 404) {
-            await redis.del(`sub:${userId}`);
-          }
+      try {
+        await webpush.sendNotification(subscription, JSON.stringify({
+          title: '\u2600\uFE0F Good morning!',
+          body: 'Today\'s reminders: ' + enabled.length + '\n' + lines.join(' \u00b7 '),
+          icon: '/icon-192.png'
+        }));
+        await redis.set(firedKey, '1', { ex: 86400 });
+        sent++;
+      } catch (pushErr) {
+        console.error('Push failed for', userId, pushErr.statusCode || pushErr.message);
+        if (pushErr.statusCode === 410 || pushErr.statusCode === 404) {
+          await redis.del(`sub:${userId}`);
         }
       }
     }
