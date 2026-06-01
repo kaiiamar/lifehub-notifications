@@ -280,6 +280,15 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
+      // If TELEGRAM_CHAT_ID is not yet set, surface the chat ID on every message
+      if (!expectedChatId) {
+        await tg('sendMessage', {
+          chat_id: chatId,
+          text: '👋 Bot is alive. Your chat ID is: ' + chatId + '\nAdd this to Vercel as TELEGRAM_CHAT_ID then redeploy. After that, all the prompts and commands will work.'
+        });
+        return res.status(200).json({ ok: true });
+      }
+
       const cmd = parseTextCommand(text);
       if (!cmd) return res.status(200).json({ ok: true });
 
