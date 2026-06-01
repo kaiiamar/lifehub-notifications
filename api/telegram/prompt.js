@@ -40,6 +40,39 @@ async function sendMorningCheckin(chatId) {
     text: greetings[Math.floor(Math.random() * greetings.length)],
     reply_markup: { inline_keyboard: moodButtons }
   });
+
+  // Then a tasks brief — what's on for today
+  if (state) {
+    const todayK = localDateKey();
+    const wkStart = (function () {
+      const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - d.getDay());
+      return localDateKey(d);
+    })();
+    const open = (state.tasks || []).filter(t => !t.done);
+    const priorities = open.filter(t => t.weekPriority === wkStart);
+    const overdue = open.filter(t => t.dueDate && t.dueDate < todayK && t.weekPriority !== wkStart);
+    const todays = open.filter(t => t.dueDate === todayK && t.weekPriority !== wkStart);
+
+    const lines = [];
+    if (priorities.length) {
+      lines.push('⭐ This week:');
+      priorities.forEach(t => lines.push('  ◯ ' + t.text));
+    }
+    if (overdue.length) {
+      lines.push('\n⚠️ Overdue:');
+      overdue.slice(0, 5).forEach(t => lines.push('  ◯ ' + t.text + ' (' + (t.dueDate || '') + ')'));
+    }
+    if (todays.length) {
+      lines.push('\n📌 Today:');
+      todays.forEach(t => lines.push('  ◯ ' + t.text));
+    }
+    if (lines.length) {
+      lines.unshift('Quick brief —');
+      lines.push('\nUse /tasks to tick anything off.');
+      await tg('sendMessage', { chat_id: chatId, text: lines.join('\n') });
+    }
+  }
+
   return { sent: 'morning' };
 }
 

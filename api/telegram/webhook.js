@@ -82,6 +82,131 @@ function fmtReply(template, vars) {
 // ----- Action handlers -----------------------------------------------------
 function genId() { return Math.random().toString(36).slice(2, 9); }
 
+// Natural-language date parser — same logic as the web app's parseNaturalDate
+function parseNaturalDate(input) {
+  if (!input) return null;
+  const s = input.trim().toLowerCase();
+  const now = new Date(); now.setHours(12, 0, 0, 0);
+  const dayMs = 86400000;
+
+  if (s === 'today' || s === 'tonight') return localDateKey(now);
+  if (s === 'tomorrow') return localDateKey(new Date(now.getTime() + dayMs));
+  if (s === 'yesterday') return localDateKey(new Date(now.getTime() - dayMs));
+
+  const dayNames = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+  const dayMatch = s.match(/^(?:next\s+|this\s+)?(\w+)$/);
+  if (dayMatch) {
+    const idx = dayNames.indexOf(dayMatch[1]);
+    if (idx > -1) {
+      let diff = idx - now.getDay();
+      if (s.startsWith('next ')) {
+        if (diff <= 0) diff += 7;
+        else diff += 7;
+      } else {
+        if (diff <= 0) diff += 7;
+      }
+      return localDateKey(new Date(now.getTime() + diff * dayMs));
+    }
+  }
+
+  const inMatch = s.match(/^in\s+(\d+)\s+(day|days|week|weeks)$/);
+  if (inMatch) {
+    const n = Number(inMatch[1]);
+    const unit = inMatch[2].startsWith('week') ? 7 : 1;
+    return localDateKey(new Date(now.getTime() + n * unit * dayMs));
+  }
+
+  const monthNames = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+  const monthShorts = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+  function findMonth(str) {
+    const i = monthNames.indexOf(str);
+    if (i > -1) return i;
+    return monthShorts.indexOf(str.slice(0, 3));
+  }
+  const dmMatch = s.match(/^(\d{1,2})(?:st|nd|rd|th)?\s+(\w+)$/);
+  if (dmMatch) {
+    const m = findMonth(dmMatch[2]);
+    if (m > -1) {
+      const dd = Number(dmMatch[1]);
+      const dt = new Date(now.getFullYear(), m, dd, 12, 0, 0);
+      if (dt < now) dt.setFullYear(now.getFullYear() + 1);
+      return localDateKey(dt);
+    }
+  }
+  const mdMatch = s.match(/^(\w+)\s+(\d{1,2})(?:st|nd|rd|th)?$/);
+  if (mdMatch) {
+    const m = findMonth(mdMatch[1]);
+    if (m > -1) {
+      const dd = Number(mdMatch[2]);
+      const dt = new Date(now.getFullYear(), m, dd, 12, 0, 0);
+      if (dt < now) dt.setFullYear(now.getFullYear() + 1);
+      return localDateKey(dt);
+    }
+  }
+
+  const slashMatch = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+  if (slashMatch) {
+    const d = Number(slashMatch[1]);
+    const m = Number(slashMatch[2]) - 1;
+    let y = slashMatch[3] ? Number(slashMatch[3]) : now.getFullYear();
+    if (y < 100) y += 2000;
+    const dt = new Date(y, m, d, 12, 0, 0);
+    if (dt < now && !slashMatch[3]) dt.setFullYear(y + 1);
+    return localDateKey(dt);
+  }
+
+  if (s === 'this week') {
+    const e = new Date(now); e.setDate(e.getDate() + (6 - e.getDay()));
+    return localDateKey(e);
+  }
+  if (s === 'next week') {
+    const start = new Date(now); start.setDate(start.getDate() + (7 - start.getDay()));
+    const end = new Date(start); end.setDate(end.getDate() + 6);
+    return localDateKey(end);
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+  return null;
+}
+
+// Parse "do X by friday" → {text, dueDate}
+function parseTaskInput(raw) {
+  const byMatch = raw.match(/^(.+?)\s+by\s+(.+)$/i);
+  if (byMatch) {
+    const d = parseNaturalDate(byMatch[2]);
+    if (d) return { text: byMatch[1].trim(), dueDate: d };
+  }
+  const onMatch = raw.match(/^(.+?)\s+on\s+(.+)$/i);
+  if (onMatch) {
+    const d = parseNaturalDate(onMatch[2]);
+    if (d) return { text: onMatch[1].trim(), dueDate: d };
+  }
+  return { text: raw.trim(), dueDate: null };
+}
+
+// Week start key (matching the web app's weekKey — Sunday-anchored)
+function weekStartKey(d) {
+  const date = d || new Date();
+  const ws = new Date(date);
+  ws.setHours(0, 0, 0, 0);
+  ws.setDate(ws.getDate() - ws.getDay());
+  return localDateKey(ws);
+}
+
+function fmtDueRel(dateKey) {
+  if (!dateKey) return '';
+  const today = new Date(localDateKey() + 'T12:00:00');
+  const d = new Date(dateKey + 'T12:00:00');
+  const diff = Math.round((d - today) / 86400000);
+  if (diff === 0) return 'today';
+  if (diff === 1) return 'tomorrow';
+  if (diff === -1) return 'yesterday';
+  if (diff > 1 && diff <= 6) return 'in ' + diff + 'd';
+  if (diff < -1 && diff >= -6) return Math.abs(diff) + 'd ago';
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+}
+
 async function handleHabitTick(habitId, chatId, messageId, allHabitsContext) {
   const state = await loadState();
   if (!state) return null;
@@ -166,6 +291,61 @@ async function handleGratitudeWin(text) {
   return { count: state.gratitude.filter(e => e.date === today).length };
 }
 
+// ----- Task handlers -------------------------------------------------------
+async function handleTaskAdd(rawText) {
+  const state = await loadState();
+  if (!state) return null;
+  if (!state.tasks) state.tasks = [];
+  const parsed = parseTaskInput(rawText);
+  const task = {
+    id: genId(),
+    text: parsed.text,
+    done: false,
+    dueDate: parsed.dueDate || null,
+    doneAt: null,
+    createdAt: localDateKey()
+  };
+  state.tasks.push(task);
+  await saveState(state);
+  return task;
+}
+
+async function handleTaskTick(taskId) {
+  const state = await loadState();
+  if (!state) return null;
+  const t = (state.tasks || []).find(x => x.id === taskId);
+  if (!t) return null;
+  const wasDone = !!t.done;
+  t.done = !wasDone;
+  t.doneAt = t.done ? localDateKey() : null;
+  await saveState(state);
+  return { task: t, done: !wasDone };
+}
+
+async function handleTaskStar(taskId) {
+  const state = await loadState();
+  if (!state) return null;
+  const t = (state.tasks || []).find(x => x.id === taskId);
+  if (!t) return null;
+  const wkKey = weekStartKey();
+  if (t.weekPriority === wkKey) delete t.weekPriority;
+  else t.weekPriority = wkKey;
+  await saveState(state);
+  return t;
+}
+
+function findTaskByQuery(state, query) {
+  const q = query.toLowerCase().trim();
+  const tasks = (state.tasks || []).filter(t => !t.done);
+  let t = tasks.find(x => x.text.toLowerCase() === q);
+  if (t) return t;
+  t = tasks.find(x => x.text.toLowerCase().startsWith(q));
+  if (t) return t;
+  t = tasks.find(x => x.text.toLowerCase().includes(q));
+  return t || null;
+}
+
+
 // ----- Reusable button builders --------------------------------------------
 function habitButtons(habits, todayKey) {
   return habits.map(h => {
@@ -201,6 +381,19 @@ function waterButtons() {
   ];
 }
 
+// Render task buttons — one per task, with star toggle inline
+function taskButtons(tasks) {
+  const wkKey = weekStartKey();
+  return tasks.map(t => {
+    const isPri = t.weekPriority === wkKey;
+    const due = t.dueDate ? ' · ' + fmtDueRel(t.dueDate) : '';
+    return [{
+      text: (t.done ? '✓ ' : '◯ ') + (isPri ? '⭐ ' : '') + t.text + due,
+      callback_data: 'task:' + t.id
+    }];
+  });
+}
+
 // ----- Text command parsing ------------------------------------------------
 function parseTextCommand(text) {
   const trimmed = (text || '').trim();
@@ -216,6 +409,14 @@ function parseTextCommand(text) {
   if (lower === '/water' || lower === 'water') return { type: 'water-prompt' };
   if (lower === '/mood' || lower === 'mood') return { type: 'mood-prompt' };
   if (lower === '/sleep' || lower === 'sleep') return { type: 'sleep-prompt' };
+  // Tasks
+  if (lower === '/tasks' || lower === 'tasks') return { type: 'tasks-list' };
+  if (lower === '/task' || lower === 'task') return { type: 'task-prompt' };
+  if (lower === '/priorities' || lower === 'priorities') return { type: 'priorities-list' };
+
+  // /task <text> — direct add with optional date parsing
+  const taskAddMatch = trimmed.match(/^\/?task\s+(.+)$/i);
+  if (taskAddMatch) return { type: 'task-add', text: taskAddMatch[1] };
 
   const moodMatch = lower.match(/^\/?mood\s+([1-5])$/);
   if (moodMatch) return { type: 'mood', value: Number(moodMatch[1]) };
@@ -234,6 +435,9 @@ function parseTextCommand(text) {
 
   const tickMatch = trimmed.match(/^\/?tick\s+(.+)$/i);
   if (tickMatch) return { type: 'tick', query: tickMatch[1] };
+
+  const starMatch = trimmed.match(/^\/?star\s+(.+)$/i);
+  if (starMatch) return { type: 'star', query: starMatch[1] };
 
   return { type: 'free-text', text: trimmed };
 }
@@ -373,6 +577,25 @@ module.exports = async function handler(req, res) {
       }
 
       if (data === 'noop') return res.status(200).json({ ok: true });
+
+      // ---- Task tick ----
+      if (data.startsWith('task:')) {
+        const tid = data.slice('task:'.length);
+        const result = await handleTaskTick(tid);
+        if (result) {
+          // Re-render the parent message if it was a task list
+          const originalText = cq.message && cq.message.text || '';
+          if (originalText.includes('tasks') || originalText.includes('priorities') || originalText.includes('Coming up')) {
+            await refreshTasksMessage(chatId, messageId, originalText);
+          }
+          await tg('sendMessage', {
+            chat_id: chatId,
+            text: result.done ? '✓ ' + result.task.text + ' done.' : 'Untiked ' + result.task.text + '.'
+          });
+        }
+        return res.status(200).json({ ok: true });
+      }
+
       return res.status(200).json({ ok: true });
     }
 
@@ -404,14 +627,14 @@ module.exports = async function handler(req, res) {
         case 'start':
           await tg('sendMessage', {
             chat_id: chatId,
-            text: 'Hey ' + timeGreeting() + ' — Life Hub bot here.\n\nI\'ll check in throughout the day:\n☀️ 7am — mood + sleep\n📋 9am, 1pm, 7pm — habits at their times\n💧 11am, 2pm, 5pm, 8pm — water nudges\n🌙 9pm — bedtime catch-up + reflection\n📅 Saturday 2pm — weekly habit check\n\nQuick commands you can send anytime:\n• /today — what\'s still untracked (with tick buttons)\n• /gratitude — log a gratitude entry\n• /win — log a win\n• /water — quick water buttons\n• /mood — quick mood buttons\n• /sleep — log sleep hours\n• tick <habit name>\n\nLet\'s keep it light. ✨'
+            text: 'Hey ' + timeGreeting() + ' — Life Hub bot here.\n\nI\'ll check in throughout the day:\n☀️ 7am — mood + sleep + your tasks for the day\n📋 9am, 1pm, 7pm — habits at their times\n💧 11am, 2pm, 5pm, 8pm — water nudges\n🌙 9pm — bedtime catch-up + reflection\n📅 Saturday 2pm — weekly habit check\n\nTask commands:\n• /tasks — see your list with tick buttons\n• /task — I\'ll ask, you reply (date parsing: "X by friday")\n• /priorities — see this week\'s starred priorities\n• /star <task> — pin a task as priority for this week\n\nLogging:\n• /gratitude · /win — I\'ll ask, you reply\n• /water · /mood — quick buttons\n• /sleep — log hours\n• tick <habit name>\n\nLet\'s keep it light. ✨'
           });
           return res.status(200).json({ ok: true });
 
         case 'help':
           await tg('sendMessage', {
             chat_id: chatId,
-            text: 'What I respond to:\n\n• /today — daily habits with tick buttons\n• /gratitude — I\'ll ask, you reply\n• /win — same flow for a win\n• /water — quick add buttons\n• /mood — quick mood emojis\n• /sleep — log sleep hours\n• tick <habit name> — tick by name\n• gratitude: <text> — log directly\n• win: <text> — log directly\n\nOr just message me a gratitude line and I\'ll log it.'
+            text: 'What I respond to:\n\nTasks:\n• /tasks — see all open tasks\n• /task — I\'ll ask\n• /task <text> — direct add\n• /task <text> by <date> — with due date\n• /priorities — this week\'s priorities\n• /star <task> — toggle priority\n\nLogging:\n• /gratitude · /win — I\'ll ask\n• /water · /mood — buttons\n• /sleep — log hours\n• /today — daily habits with ticks\n• tick <habit name>\n\nDate phrases I understand:\n• today, tomorrow, tonight\n• monday, friday, next monday\n• 5 dec, december 5, 5/12\n• in 3 days, in 2 weeks\n• this week, next week'
           });
           return res.status(200).json({ ok: true });
 
@@ -532,6 +755,80 @@ module.exports = async function handler(req, res) {
           return res.status(200).json({ ok: true });
         }
 
+        case 'tasks-list': {
+          const state = await loadState();
+          if (!state) {
+            await tg('sendMessage', { chat_id: chatId, text: 'Could not load Life Hub data.' });
+            return res.status(200).json({ ok: true });
+          }
+          await sendTasksBoard(chatId, state);
+          return res.status(200).json({ ok: true });
+        }
+
+        case 'priorities-list': {
+          const state = await loadState();
+          if (!state) {
+            await tg('sendMessage', { chat_id: chatId, text: 'Could not load Life Hub data.' });
+            return res.status(200).json({ ok: true });
+          }
+          const wkKey = weekStartKey();
+          const pris = (state.tasks || []).filter(t => t.weekPriority === wkKey);
+          if (!pris.length) {
+            await tg('sendMessage', {
+              chat_id: chatId,
+              text: '⭐ No priorities set for this week yet. Star a task with /star <name> or in the app to add it here.'
+            });
+          } else {
+            const done = pris.filter(t => t.done).length;
+            await tg('sendMessage', {
+              chat_id: chatId,
+              text: '⭐ This week\'s priorities (' + done + '/' + pris.length + '):',
+              reply_markup: { inline_keyboard: taskButtons(pris) }
+            });
+          }
+          return res.status(200).json({ ok: true });
+        }
+
+        case 'task-prompt':
+          await tg('sendMessage', {
+            chat_id: chatId,
+            text: '📝 What\'s the task? You can add a date too — like "book flights by friday" or "pay bill on 5 dec"',
+            reply_markup: { force_reply: true, input_field_placeholder: 'task or "task by date"' }
+          });
+          return res.status(200).json({ ok: true });
+
+        case 'task-add': {
+          const task = await handleTaskAdd(cmd.text);
+          if (!task) {
+            await tg('sendMessage', { chat_id: chatId, text: 'Could not save that.' });
+            return res.status(200).json({ ok: true });
+          }
+          const dueText = task.dueDate ? ' · due ' + fmtDueRel(task.dueDate) : ' · no due date';
+          await tg('sendMessage', { chat_id: chatId, text: '✓ Added: ' + task.text + dueText });
+          return res.status(200).json({ ok: true });
+        }
+
+        case 'star': {
+          const state = await loadState();
+          if (!state) {
+            await tg('sendMessage', { chat_id: chatId, text: 'Could not load Life Hub data.' });
+            return res.status(200).json({ ok: true });
+          }
+          const t = findTaskByQuery(state, cmd.query);
+          if (!t) {
+            await tg('sendMessage', { chat_id: chatId, text: 'No task matched "' + cmd.query + '".' });
+            return res.status(200).json({ ok: true });
+          }
+          const updated = await handleTaskStar(t.id);
+          const wkKey = weekStartKey();
+          const isOn = updated.weekPriority === wkKey;
+          await tg('sendMessage', {
+            chat_id: chatId,
+            text: isOn ? '⭐ "' + t.text + '" added to this week\'s priorities.' : '☆ "' + t.text + '" removed from priorities.'
+          });
+          return res.status(200).json({ ok: true });
+        }
+
         case 'free-text': {
           // Routed reply to a force_reply prompt?
           const replyTo = msg.reply_to_message && msg.reply_to_message.text;
@@ -552,6 +849,12 @@ module.exports = async function handler(req, res) {
           if (replyTo && /win/i.test(replyTo)) {
             await handleGratitudeWin(text);
             await tg('sendMessage', { chat_id: chatId, text: fmtReply(pick(REPLIES.winLogged), { x: text }) });
+            return res.status(200).json({ ok: true });
+          }
+          if (replyTo && /what.*task|book flights|task or/i.test(replyTo)) {
+            const task = await handleTaskAdd(text);
+            const dueText = task && task.dueDate ? ' · due ' + fmtDueRel(task.dueDate) : ' · no due date';
+            await tg('sendMessage', { chat_id: chatId, text: '✓ Added: ' + (task ? task.text : text) + dueText });
             return res.status(200).json({ ok: true });
           }
           // Default — treat as gratitude if it's a sentence
@@ -648,6 +951,106 @@ async function refreshHabitListMessage(chatId, messageId, originalText) {
       chat_id: chatId,
       message_id: messageId,
       reply_markup: { inline_keyboard: buttons }
+    });
+  } catch (e) { /* ignore */ }
+}
+
+// ----- Tasks board ---------------------------------------------------------
+async function sendTasksBoard(chatId, state) {
+  const todayKey = localDateKey();
+  const wkKey = weekStartKey();
+  const wkEnd = new Date(); wkEnd.setDate(wkEnd.getDate() + 6);
+  const wkEndKey = localDateKey(wkEnd);
+
+  const open = (state.tasks || []).filter(t => !t.done);
+  const priorities = open.filter(t => t.weekPriority === wkKey);
+  const nonPri = open.filter(t => t.weekPriority !== wkKey);
+  const overdue = nonPri.filter(t => t.dueDate && t.dueDate < todayKey);
+  const today = nonPri.filter(t => !t.dueDate || t.dueDate === todayKey);
+  const upcoming = nonPri.filter(t => t.dueDate && t.dueDate > todayKey && t.dueDate <= wkEndKey);
+
+  const lines = [];
+  lines.push('📋 Your tasks');
+
+  let buttons = [];
+  if (priorities.length) {
+    lines.push('\n⭐ This week\'s priorities (' + priorities.filter(t => t.done).length + '/' + priorities.length + ')');
+    buttons = buttons.concat(taskButtons(priorities));
+  }
+  if (overdue.length) {
+    lines.push('\n⚠️ Overdue (' + overdue.length + ')');
+    buttons = buttons.concat(taskButtons(overdue));
+  }
+  if (today.length) {
+    lines.push('\n📌 Today + no date (' + today.length + ')');
+    buttons = buttons.concat(taskButtons(today));
+  }
+  if (upcoming.length) {
+    lines.push('\n📅 Coming up (' + upcoming.length + ')');
+    buttons = buttons.concat(taskButtons(upcoming));
+  }
+  if (!open.length) {
+    lines.push('\nAll clear ✓ Add one with /task');
+  }
+
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text: lines.join('\n'),
+    reply_markup: buttons.length ? { inline_keyboard: buttons } : undefined
+  });
+}
+
+async function refreshTasksMessage(chatId, messageId, originalText) {
+  const state = await loadState();
+  if (!state) return;
+  // Re-derive what kind of board this was — for simplicity, re-render everything
+  // for /tasks; for /priorities show only priorities.
+  const wkKey = weekStartKey();
+  const todayKey = localDateKey();
+  const wkEnd = new Date(); wkEnd.setDate(wkEnd.getDate() + 6);
+  const wkEndKey = localDateKey(wkEnd);
+  const open = (state.tasks || []).filter(t => !t.done);
+
+  let allButtons = [];
+  let lines = [];
+
+  if (originalText.includes('priorities (')) {
+    const pris = (state.tasks || []).filter(t => t.weekPriority === wkKey);
+    const done = pris.filter(t => t.done).length;
+    lines.push('⭐ This week\'s priorities (' + done + '/' + pris.length + '):');
+    allButtons = taskButtons(pris);
+  } else {
+    const priorities = open.filter(t => t.weekPriority === wkKey);
+    const nonPri = open.filter(t => t.weekPriority !== wkKey);
+    const overdue = nonPri.filter(t => t.dueDate && t.dueDate < todayKey);
+    const today = nonPri.filter(t => !t.dueDate || t.dueDate === todayKey);
+    const upcoming = nonPri.filter(t => t.dueDate && t.dueDate > todayKey && t.dueDate <= wkEndKey);
+    lines.push('📋 Your tasks');
+    if (priorities.length) {
+      lines.push('\n⭐ This week\'s priorities (' + priorities.filter(t => t.done).length + '/' + priorities.length + ')');
+      allButtons = allButtons.concat(taskButtons(priorities));
+    }
+    if (overdue.length) {
+      lines.push('\n⚠️ Overdue (' + overdue.length + ')');
+      allButtons = allButtons.concat(taskButtons(overdue));
+    }
+    if (today.length) {
+      lines.push('\n📌 Today + no date (' + today.length + ')');
+      allButtons = allButtons.concat(taskButtons(today));
+    }
+    if (upcoming.length) {
+      lines.push('\n📅 Coming up (' + upcoming.length + ')');
+      allButtons = allButtons.concat(taskButtons(upcoming));
+    }
+    if (!open.length) lines.push('\nAll clear ✓ Add one with /task');
+  }
+
+  try {
+    await tg('editMessageText', {
+      chat_id: chatId,
+      message_id: messageId,
+      text: lines.join('\n'),
+      reply_markup: allButtons.length ? { inline_keyboard: allButtons } : { inline_keyboard: [] }
     });
   } catch (e) { /* ignore */ }
 }
