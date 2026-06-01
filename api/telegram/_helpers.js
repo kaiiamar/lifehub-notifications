@@ -141,6 +141,38 @@ async function clearPending(token) {
   try { await r.del('pending:' + token); } catch (e) { /* ignore */ }
 }
 
+// ----- Generic KV (Redis) ---------------------------------------------------
+// Small reusable JSON store used by features that need to remember something
+// across invocations (e.g. when the rut nudge last fired). Fails soft.
+async function kvGet(key) {
+  const r = getRedis();
+  if (!r) return null;
+  try {
+    const raw = await r.get('lh:' + key);
+    if (raw == null) return null;
+    if (typeof raw === 'string') {
+      try { return JSON.parse(raw); } catch (e) { return raw; }
+    }
+    return raw;
+  } catch (e) {
+    console.error('kvGet failed:', e.message);
+    return null;
+  }
+}
+
+async function kvSet(key, value, ttlSec) {
+  const r = getRedis();
+  if (!r) return false;
+  try {
+    const opts = ttlSec ? { ex: ttlSec } : undefined;
+    await r.set('lh:' + key, JSON.stringify(value), opts);
+    return true;
+  } catch (e) {
+    console.error('kvSet failed:', e.message);
+    return false;
+  }
+}
+
 // Habit helpers — match the web app's logic for "due today"
 function habitDayStatus(h, dateKey) {
   const f = (h.freq || 'daily').toLowerCase();
@@ -192,5 +224,7 @@ module.exports = {
   isHabitWeeklyOutstanding,
   savePending,
   loadPending,
-  clearPending
+  clearPending,
+  kvGet,
+  kvSet
 };

@@ -9,8 +9,14 @@ const {
   getChatId,
   localDateKey,
   isHabitDailyDueToday,
-  isHabitWeeklyOutstanding
+  isHabitWeeklyOutstanding,
+  kvGet,
+  kvSet
 } = require('./_helpers.js');
+const { claude } = require('./_ai.js');
+const { buildWeekSummary, summaryToLines, detectRut, pickRestartAction } = require('./_digest.js');
+
+const SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || 'claude-sonnet-4-6';
 
 async function sendMorningCheckin(chatId) {
   // Already logged?
@@ -213,6 +219,81 @@ async function sendWeeklyCheckin(chatId) {
   return { sent: 'weekly', count: outstanding.length };
 }
 
+async function sendWeeklyDigest(chatId) {
+  const state = await loadState();
+  if (!state) return { error: 'no-state' };
+  const summary = buildWeekSummary(state);
+  const lines = summaryToLines(summary);
+  if (!lines.length) {
+    await tg('sendMessage', { chat_id: chatId, text: '📊 Weekly digest — not much logged this week yet. New week, fresh start. What\'s one thing you want to nail?' });
+    return { skipped: 'no-data' };
+  }
+
+  const system = [
+    'You are a warm, sharp weekly coach inside a wellbeing app for someone with ADHD working on productivity and sticking to goals.',
+    'Write a SHORT weekly digest (Sunday evening) — 3 to 4 sentences, under 80 words.',
+    'Open with the single most encouraging true thing from the data. Then name one thing that slipped, kindly.',
+    'End with ONE specific, tiny focus for the week ahead drawn from the weakest area or upcoming deadline.',
+    'Be specific to the numbers. Sound like a friend who pays attention, not a report.',
+    'No markdown, no bullet points, no sign-off. One or two light emoji max. British English. Address them as "you".'
+  ].join(' ');
+
+  const text = await claude({
+    model: SONNET_MODEL,
+    maxTokens: 220,
+    temperature: 0.7,
+    system: system,
+    prompt: 'This week\'s data:\n' + lines.join('\n') + '\n\nWrite the weekly digest:'
+  });
+
+  const fallback = '📊 Week in review: habits at ' + (summary.habitsThisWeek != null ? summary.habitsThisWeek + '%' : 'n/a')
+    + ', ' + summary.sessionsThisWeek + ' workouts, ' + summary.tasksDone + ' tasks done. '
+    + 'New week ahead — pick one thing to focus on.';
+
+  await tg('sendMessage', { chat_id: chatId, text: (text || fallback) });
+  return { sent: 'weekly-digest', habits: summary.habitsThisWeek };
+}
+
+async function sendRutCheck(chatId) {
+  const state = await loadState();
+  if (!state) return { error: 'no-state' };
+  const rut = detectRut(state);
+  if (!rut.inRut) return { skipped: 'not-in-rut', daysQuiet: rut.daysQuiet };
+
+  // Debounce: don't nudge more than once every 2 days.
+  const lastNudge = await kvGet('rutNudge');
+  if (lastNudge && lastNudge.date) {
+    const diff = (new Date(rut.todayKey) - new Date(lastNudge.date)) / 86400000;
+    if (diff < 2) return { skipped: 'recently-nudged', daysQuiet: rut.daysQuiet };
+  }
+
+  const action = pickRestartAction(state);
+
+  const system = [
+    'You are a kind, non-judgemental friend inside a wellbeing app. The user has ADHD and has gone quiet for a couple of days — no habits, mood, or activity logged.',
+    'Send a SHORT, warm check-in (2 sentences, under 40 words). No guilt, no "you should".',
+    'Acknowledge that off-days happen, then gently offer ONE tiny restart: "' + action.label + '".',
+    'Sound human and low-pressure, like a mate texting. One soft emoji max. No markdown. British English.'
+  ].join(' ');
+
+  const text = await claude({
+    maxTokens: 120,
+    temperature: 0.8,
+    system: system,
+    prompt: 'It has been about ' + rut.daysQuiet + ' quiet days. Write the gentle check-in that ends by offering to ' + action.label + ':'
+  });
+
+  const fallback = 'Hey — noticed it\'s been a couple of quiet days. No stress, off-days are normal. Want to ease back in with just one thing: ' + action.label + '? 🌱';
+
+  const reply_markup = action.kind === 'habit'
+    ? { inline_keyboard: [[{ text: '✓ ' + action.label, callback_data: 'habit:' + action.habit.id }]] }
+    : { inline_keyboard: [[{ text: '💧 + 1 glass', callback_data: 'water:250' }]] };
+
+  await tg('sendMessage', { chat_id: chatId, text: (text || fallback), reply_markup: reply_markup });
+  await kvSet('rutNudge', { date: rut.todayKey }, 60 * 60 * 24 * 7);
+  return { sent: 'rut-check', daysQuiet: rut.daysQuiet };
+}
+
 module.exports = async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST' && req.method !== 'GET') {
@@ -235,6 +316,8 @@ module.exports = async function handler(req, res) {
       case 'water':              result = await sendWaterPrompt(chatId); break;
       case 'bedtime':            result = await sendBedtimeCatchup(chatId); break;
       case 'weekly':             result = await sendWeeklyCheckin(chatId); break;
+      case 'weekly-digest':      result = await sendWeeklyDigest(chatId); break;
+      case 'rut-check':          result = await sendRutCheck(chatId); break;
       default:
         return res.status(400).json({ error: 'Unknown type: ' + type });
     }

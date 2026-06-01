@@ -13,15 +13,17 @@ const SCHEDULES = [
   { type: 'anchor-morning', hour: 9, minute: 0, days: '*' },
   { type: 'anchor-midday', hour: 13, minute: 0, days: '*' },
   { type: 'anchor-evening', hour: 19, minute: 0, days: '*' },
-  // Water (4 reminders per day)
-  { type: 'water', hour: 11, minute: 0, days: '*' },
-  { type: 'water', hour: 14, minute: 0, days: '*' },
+  // Water (2 reminders per day — trimmed from 4 to free QStash slots)
+  { type: 'water', hour: 12, minute: 0, days: '*' },
   { type: 'water', hour: 17, minute: 0, days: '*' },
-  { type: 'water', hour: 20, minute: 0, days: '*' },
   // 9pm — bedtime catch-up + gratitude
   { type: 'bedtime', hour: 21, minute: 0, days: '*' },
   // Saturday 2pm — weekly habit check-in (cron uses 6 = Saturday)
-  { type: 'weekly', hour: 14, minute: 0, days: '6' }
+  { type: 'weekly', hour: 14, minute: 0, days: '6' },
+  // Sunday 6pm — AI weekly digest (Claude Sonnet reflection)
+  { type: 'weekly-digest', hour: 18, minute: 0, days: '0' },
+  // Daily 4pm — rut detector (only fires a message if 2+ quiet days)
+  { type: 'rut-check', hour: 16, minute: 0, days: '*' }
 ];
 
 module.exports = async function handler(req, res) {
