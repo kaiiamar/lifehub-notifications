@@ -15,6 +15,29 @@ const {
   habitDayStatus,
   isHabitDailyDueToday
 } = require('./_helpers.js');
+const { claudeOr } = require('./_ai.js');
+
+// ----- AI reply helpers ----------------------------------------------------
+// Warm, brief acknowledgements for gratitude/wins. Falls back to canned pools
+// if the API is unavailable or slow. Kept to one or two sentences.
+async function aiGratitudeReply(entryText, fallback) {
+  const out = await claudeOr(null, {
+    maxTokens: 80,
+    temperature: 0.8,
+    system: 'You are a warm, grounded companion inside a personal wellbeing app. The user just logged something they are grateful for. Reply in ONE short sentence (max 20 words) — genuine, never saccharine, never starting with "That\'s". No emojis unless it truly fits. British English.',
+    prompt: 'They are grateful for: "' + entryText + '"\n\nYour one-sentence reply:'
+  });
+  return out ? '🙏 ' + out : fallback;
+}
+async function aiWinReply(entryText, fallback) {
+  const out = await claudeOr(null, {
+    maxTokens: 80,
+    temperature: 0.8,
+    system: 'You are a warm, encouraging companion inside a personal wellbeing app. The user just logged a win. Celebrate it in ONE short sentence (max 20 words) — genuine and specific to what they said, not generic hype. British English.',
+    prompt: 'Their win: "' + entryText + '"\n\nYour one-sentence reply:'
+  });
+  return out ? '🏆 ' + out : fallback;
+}
 
 // ----- Tone helpers --------------------------------------------------------
 // Pick a random friendly reply from a pool — keeps the bot feeling alive.
@@ -729,13 +752,15 @@ module.exports = async function handler(req, res) {
 
         case 'gratitude': {
           await handleGratitude(cmd.text);
-          await tg('sendMessage', { chat_id: chatId, text: fmtReply(pick(REPLIES.gratitudeLogged), { x: cmd.text }) });
+          var gFallback = fmtReply(pick(REPLIES.gratitudeLogged), { x: cmd.text });
+          await tg('sendMessage', { chat_id: chatId, text: await aiGratitudeReply(cmd.text, gFallback) });
           return res.status(200).json({ ok: true });
         }
 
         case 'win': {
           await handleGratitudeWin(cmd.text);
-          await tg('sendMessage', { chat_id: chatId, text: fmtReply(pick(REPLIES.winLogged), { x: cmd.text }) });
+          var wFallback = fmtReply(pick(REPLIES.winLogged), { x: cmd.text });
+          await tg('sendMessage', { chat_id: chatId, text: await aiWinReply(cmd.text, wFallback) });
           return res.status(200).json({ ok: true });
         }
 
@@ -843,12 +868,14 @@ module.exports = async function handler(req, res) {
           }
           if (replyTo && /grateful|gratitude|reflect/i.test(replyTo)) {
             await handleGratitude(text);
-            await tg('sendMessage', { chat_id: chatId, text: fmtReply(pick(REPLIES.gratitudeLogged), { x: text }) });
+            var grFb = fmtReply(pick(REPLIES.gratitudeLogged), { x: text });
+            await tg('sendMessage', { chat_id: chatId, text: await aiGratitudeReply(text, grFb) });
             return res.status(200).json({ ok: true });
           }
           if (replyTo && /win/i.test(replyTo)) {
             await handleGratitudeWin(text);
-            await tg('sendMessage', { chat_id: chatId, text: fmtReply(pick(REPLIES.winLogged), { x: text }) });
+            var wnFb = fmtReply(pick(REPLIES.winLogged), { x: text });
+            await tg('sendMessage', { chat_id: chatId, text: await aiWinReply(text, wnFb) });
             return res.status(200).json({ ok: true });
           }
           if (replyTo && /what.*task|book flights|task or/i.test(replyTo)) {
@@ -860,7 +887,9 @@ module.exports = async function handler(req, res) {
           // Default — treat as gratitude if it's a sentence
           if (text.split(/\s+/).length >= 3) {
             await handleGratitude(text);
-            await tg('sendMessage', { chat_id: chatId, text: fmtReply(pick(REPLIES.gratitudeLogged), { x: text }) + '\n\n(Send /help if you wanted a different command.)' });
+            var defFb = fmtReply(pick(REPLIES.gratitudeLogged), { x: text });
+            var defReply = await aiGratitudeReply(text, defFb);
+            await tg('sendMessage', { chat_id: chatId, text: defReply + '\n\n(Send /help if you wanted a different command.)' });
             return res.status(200).json({ ok: true });
           }
           await tg('sendMessage', { chat_id: chatId, text: pick(REPLIES.unknown) });
