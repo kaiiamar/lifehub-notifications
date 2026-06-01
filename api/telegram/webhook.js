@@ -13,9 +13,12 @@ const {
   getChatId,
   localDateKey,
   habitDayStatus,
-  isHabitDailyDueToday
+  isHabitDailyDueToday,
+  savePending,
+  loadPending,
+  clearPending
 } = require('./_helpers.js');
-const { claudeOr } = require('./_ai.js');
+const { claudeOr, parseLifeLog } = require('./_ai.js');
 
 // ----- AI reply helpers ----------------------------------------------------
 // Warm, brief acknowledgements for gratitude/wins. Falls back to canned pools
@@ -368,6 +371,127 @@ function findTaskByQuery(state, query) {
   return t || null;
 }
 
+// ----- Free-text logging (AI) ----------------------------------------------
+// Turn a parsed action object into a human-readable preview + apply function.
+function describeActions(actions, state) {
+  const lines = [];
+  const moodEm = ['', '😞', '😐', '🙂', '😊', '🤩'];
+  if (typeof actions.sleep === 'number') lines.push('💤 Sleep: ' + actions.sleep + 'h');
+  if (typeof actions.mood === 'number') lines.push('🌡️ Mood: ' + (moodEm[actions.mood] || actions.mood));
+  if (typeof actions.water === 'number') lines.push('💧 Water: +' + actions.water + 'ml');
+  if (actions.habits && actions.habits.length) {
+    // Resolve to real habit names
+    const resolved = actions.habits.map(h => {
+      const match = (state.habits || []).find(x => x.name.toLowerCase().includes(String(h).toLowerCase()) || String(h).toLowerCase().includes(x.name.toLowerCase()));
+      return match ? match.name : h;
+    });
+    lines.push('✅ Habits: ' + resolved.join(', '));
+  }
+  if (actions.workouts && actions.workouts.length) {
+    actions.workouts.forEach(w => {
+      if (w.kind === 'run') lines.push('🏃 Run' + (w.distance ? ' ' + w.distance + 'km' : '') + (w.time ? ' · ' + w.time : ''));
+      else lines.push('🏋️ ' + (w.type || 'Gym session'));
+    });
+  }
+  if (actions.tasks && actions.tasks.length) {
+    actions.tasks.forEach(t => lines.push('📝 Task: ' + t.text + (t.due ? ' (by ' + t.due + ')' : '')));
+  }
+  if (actions.gratitude) lines.push('🙏 Gratitude: ' + actions.gratitude);
+  if (actions.wins) lines.push('🏆 Win: ' + actions.wins);
+  return lines;
+}
+
+async function applyActions(actions) {
+  const state = await loadState();
+  if (!state) return { error: 'no-state' };
+  const today = localDateKey();
+  const applied = [];
+
+  if (typeof actions.sleep === 'number') {
+    if (!state.mood) state.mood = {};
+    if (!state.mood[today]) state.mood[today] = {};
+    state.mood[today].sleep = actions.sleep;
+    applied.push('sleep');
+  }
+  if (typeof actions.mood === 'number') {
+    if (!state.mood) state.mood = {};
+    if (!state.mood[today]) state.mood[today] = {};
+    state.mood[today].mood = actions.mood;
+    applied.push('mood');
+  }
+  if (typeof actions.water === 'number') {
+    if (!state.water) state.water = {};
+    if (!state.waterSettings) state.waterSettings = {};
+    const glassMl = Number(state.waterSettings.glassMl || 250);
+    const cur = Number(state.water[today] || 0);
+    state.water[today] = Math.round((cur + actions.water / glassMl) * 100) / 100;
+    applied.push('water');
+  }
+  if (actions.habits && actions.habits.length) {
+    actions.habits.forEach(h => {
+      const match = (state.habits || []).find(x => x.name.toLowerCase().includes(String(h).toLowerCase()) || String(h).toLowerCase().includes(x.name.toLowerCase()));
+      if (match) {
+        if (!match.logs) match.logs = {};
+        match.logs[today] = true;
+        applied.push('habit:' + match.name);
+      }
+    });
+  }
+  if (actions.workouts && actions.workouts.length) {
+    if (!state.workouts) state.workouts = [];
+    if (!state.metrics) state.metrics = {};
+    if (!state.metrics.run) state.metrics.run = [];
+    actions.workouts.forEach(w => {
+      if (w.kind === 'run') {
+        state.metrics.run.push({ id: genId(), date: today, distance: Number(w.distance || 0), time: w.time || '', note: w.note || '' });
+        // also tick a running habit if present
+        const runHabit = (state.habits || []).find(x => /run/i.test(x.name));
+        if (runHabit) { if (!runHabit.logs) runHabit.logs = {}; runHabit.logs[today] = true; }
+        applied.push('run');
+      } else {
+        const type = w.type || 'Gym';
+        state.workouts.push({ id: genId(), date: today, type: type, name: type, note: w.note || '', muscleGroups: [type] });
+        const gymHabit = (state.habits || []).find(x => /gym/i.test(x.name));
+        if (gymHabit) { if (!gymHabit.logs) gymHabit.logs = {}; gymHabit.logs[today] = true; }
+        applied.push('workout');
+      }
+    });
+  }
+  if (actions.tasks && actions.tasks.length) {
+    if (!state.tasks) state.tasks = [];
+    actions.tasks.forEach(t => {
+      const due = t.due ? parseNaturalDate(t.due) : null;
+      state.tasks.push({ id: genId(), text: t.text, done: false, dueDate: due, doneAt: null, createdAt: today });
+      applied.push('task');
+    });
+  }
+  if (actions.gratitude) {
+    if (!state.gratitude) state.gratitude = [];
+    state.gratitude.push({ id: genId(), date: today, wins: '', gratitude: actions.gratitude });
+    applied.push('gratitude');
+  }
+  if (actions.wins) {
+    if (!state.gratitude) state.gratitude = [];
+    state.gratitude.push({ id: genId(), date: today, wins: actions.wins, gratitude: '' });
+    applied.push('win');
+  }
+
+  await saveState(state);
+  return { applied };
+}
+
+function hasAnyAction(a) {
+  if (!a) return false;
+  return typeof a.sleep === 'number' || typeof a.mood === 'number' || typeof a.water === 'number'
+    || (a.habits && a.habits.length) || (a.workouts && a.workouts.length)
+    || (a.tasks && a.tasks.length) || a.gratitude || a.wins;
+}
+
+function shortToken() {
+  return Math.random().toString(36).slice(2, 8);
+}
+
+
 
 // ----- Reusable button builders --------------------------------------------
 function habitButtons(habits, todayKey) {
@@ -619,6 +743,32 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
+      // ---- Free-text log confirm / cancel ----
+      if (data.startsWith('logyes:')) {
+        const token = data.slice('logyes:'.length);
+        const actions = await loadPending(token);
+        if (!actions) {
+          await tg('sendMessage', { chat_id: chatId, text: 'That one expired — send it again?' });
+          return res.status(200).json({ ok: true });
+        }
+        await applyActions(actions);
+        await clearPending(token);
+        try {
+          await tg('editMessageReplyMarkup', { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } });
+        } catch (e) { /* ignore */ }
+        await tg('sendMessage', { chat_id: chatId, text: 'Saved ✓ All logged.' });
+        return res.status(200).json({ ok: true });
+      }
+      if (data.startsWith('logno:')) {
+        const token = data.slice('logno:'.length);
+        await clearPending(token);
+        try {
+          await tg('editMessageReplyMarkup', { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } });
+        } catch (e) { /* ignore */ }
+        await tg('sendMessage', { chat_id: chatId, text: 'No worries — nothing saved. Rephrase and send again?' });
+        return res.status(200).json({ ok: true });
+      }
+
       return res.status(200).json({ ok: true });
     }
 
@@ -650,14 +800,14 @@ module.exports = async function handler(req, res) {
         case 'start':
           await tg('sendMessage', {
             chat_id: chatId,
-            text: 'Hey ' + timeGreeting() + ' — Life Hub bot here.\n\nI\'ll check in throughout the day:\n☀️ 7am — mood + sleep + your tasks for the day\n📋 9am, 1pm, 7pm — habits at their times\n💧 11am, 2pm, 5pm, 8pm — water nudges\n🌙 9pm — bedtime catch-up + reflection\n📅 Saturday 2pm — weekly habit check\n\nTask commands:\n• /tasks — see your list with tick buttons\n• /task — I\'ll ask, you reply (date parsing: "X by friday")\n• /priorities — see this week\'s starred priorities\n• /star <task> — pin a task as priority for this week\n\nLogging:\n• /gratitude · /win — I\'ll ask, you reply\n• /water · /mood — quick buttons\n• /sleep — log hours\n• tick <habit name>\n\nLet\'s keep it light. ✨'
+            text: 'Hey ' + timeGreeting() + ' — Life Hub bot here.\n\n✨ Just talk to me. Tell me about your day however it comes out:\n"slept badly, did a 5k this morning, forgot lunch, grateful for the sunshine"\n— I\'ll figure out what to log and check with you before saving.\n\nI also check in through the day:\n☀️ 7am — mood + sleep + tasks brief\n📋 9am, 1pm, 7pm — habits\n💧 11am, 2pm, 5pm, 8pm — water\n🌙 9pm — bedtime catch-up + reflection\n📅 Saturday 2pm — weekly habits\n\nOr use commands: /tasks /task /priorities /gratitude /win /water /mood /sleep /today /help'
           });
           return res.status(200).json({ ok: true });
 
         case 'help':
           await tg('sendMessage', {
             chat_id: chatId,
-            text: 'What I respond to:\n\nTasks:\n• /tasks — see all open tasks\n• /task — I\'ll ask\n• /task <text> — direct add\n• /task <text> by <date> — with due date\n• /priorities — this week\'s priorities\n• /star <task> — toggle priority\n\nLogging:\n• /gratitude · /win — I\'ll ask\n• /water · /mood — buttons\n• /sleep — log hours\n• /today — daily habits with ticks\n• tick <habit name>\n\nDate phrases I understand:\n• today, tomorrow, tonight\n• monday, friday, next monday\n• 5 dec, december 5, 5/12\n• in 3 days, in 2 weeks\n• this week, next week'
+            text: '✨ Easiest way: just message me naturally and I\'ll parse it.\n"6h sleep, gym done, feeling good, grateful for the gym session" → I\'ll log all of it after you confirm.\n\nOr precise commands:\n\nTasks:\n• /tasks — see all open tasks\n• /task — I\'ll ask\n• /task <text> by <date> — direct add\n• /priorities — this week\'s priorities\n• /star <task> — toggle priority\n\nLogging:\n• /gratitude · /win — I\'ll ask\n• /water · /mood — buttons\n• /sleep — log hours\n• /today — daily habits with ticks\n• tick <habit name>\n\nDates I understand: today, tomorrow, monday, 5 dec, in 3 days, this week.'
           });
           return res.status(200).json({ ok: true });
 
@@ -884,12 +1034,33 @@ module.exports = async function handler(req, res) {
             await tg('sendMessage', { chat_id: chatId, text: '✓ Added: ' + (task ? task.text : text) + dueText });
             return res.status(200).json({ ok: true });
           }
-          // Default — treat as gratitude if it's a sentence
+          // Default — run it through the AI parser (free-text logging)
+          const state = await loadState();
+          const habitNames = state ? (state.habits || []).map(h => h.name) : [];
+          const actions = await parseLifeLog(text, { habitNames: habitNames });
+
+          if (actions && hasAnyAction(actions)) {
+            // Show a confirmation with everything understood
+            const preview = describeActions(actions, state);
+            const token = shortToken();
+            await savePending(token, actions);
+            await tg('sendMessage', {
+              chat_id: chatId,
+              text: 'Here\'s what I caught:\n\n' + preview.join('\n') + '\n\nSave these?',
+              reply_markup: { inline_keyboard: [[
+                { text: '✓ Save all', callback_data: 'logyes:' + token },
+                { text: '✗ Cancel', callback_data: 'logno:' + token }
+              ]] }
+            });
+            return res.status(200).json({ ok: true });
+          }
+
+          // Nothing structured found — treat a sentence as gratitude, else help
           if (text.split(/\s+/).length >= 3) {
             await handleGratitude(text);
             var defFb = fmtReply(pick(REPLIES.gratitudeLogged), { x: text });
             var defReply = await aiGratitudeReply(text, defFb);
-            await tg('sendMessage', { chat_id: chatId, text: defReply + '\n\n(Send /help if you wanted a different command.)' });
+            await tg('sendMessage', { chat_id: chatId, text: defReply });
             return res.status(200).json({ ok: true });
           }
           await tg('sendMessage', { chat_id: chatId, text: pick(REPLIES.unknown) });

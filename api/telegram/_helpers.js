@@ -94,6 +94,53 @@ function nowLocal() {
   return new Date(Date.now() + offset * 3600000);
 }
 
+// ----- Pending action storage (Redis) --------------------------------------
+// Free-text logging parses a message into actions, stores them, and waits for
+// the user to tap Confirm. We key by a short token embedded in the button.
+let _redis = null;
+function getRedis() {
+  if (_redis) return _redis;
+  try {
+    const { Redis } = require('@upstash/redis');
+    _redis = new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN });
+  } catch (e) {
+    console.error('Redis init failed:', e.message);
+    return null;
+  }
+  return _redis;
+}
+
+async function savePending(token, actions) {
+  const r = getRedis();
+  if (!r) return false;
+  try {
+    await r.set('pending:' + token, JSON.stringify(actions), { ex: 900 }); // 15 min expiry
+    return true;
+  } catch (e) {
+    console.error('savePending failed:', e.message);
+    return false;
+  }
+}
+
+async function loadPending(token) {
+  const r = getRedis();
+  if (!r) return null;
+  try {
+    const raw = await r.get('pending:' + token);
+    if (!raw) return null;
+    return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch (e) {
+    console.error('loadPending failed:', e.message);
+    return null;
+  }
+}
+
+async function clearPending(token) {
+  const r = getRedis();
+  if (!r) return;
+  try { await r.del('pending:' + token); } catch (e) { /* ignore */ }
+}
+
 // Habit helpers — match the web app's logic for "due today"
 function habitDayStatus(h, dateKey) {
   const f = (h.freq || 'daily').toLowerCase();
@@ -142,5 +189,8 @@ module.exports = {
   nowLocal,
   habitDayStatus,
   isHabitDailyDueToday,
-  isHabitWeeklyOutstanding
+  isHabitWeeklyOutstanding,
+  savePending,
+  loadPending,
+  clearPending
 };

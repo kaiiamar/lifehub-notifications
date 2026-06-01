@@ -65,4 +65,54 @@ async function claudeOr(fallback, opts) {
   return (out && out.length) ? out : fallback;
 }
 
-module.exports = { claude, claudeOr, DEFAULT_MODEL };
+// Parse a free-text brain-dump into structured log actions.
+// Returns an object (possibly empty) or null on failure.
+// Schema:
+//   { sleep?:number, mood?:1-5, water?:number(ml),
+//     habits?:[string], gratitude?:string, wins?:string,
+//     workouts?:[{kind:'gym'|'run', type?, distance?, time?, note?}],
+//     tasks?:[{text, due?}] }
+async function parseLifeLog(text, context) {
+  const habitNames = (context && context.habitNames) || [];
+  const system = [
+    'You extract structured log data from a casual message someone sends to their personal wellbeing tracker.',
+    'Return ONLY valid JSON, no prose, no markdown fences.',
+    'Schema (include only keys the message actually mentions):',
+    '{',
+    '  "sleep": number (hours, e.g. 6.5),',
+    '  "mood": integer 1-5 (1 awful, 3 ok, 5 great),',
+    '  "water": number (millilitres to add, e.g. 500),',
+    '  "habits": [strings that loosely match the user\'s habit names],',
+    '  "workouts": [{"kind":"gym"|"run","type":string,"distance":number(km),"time":string,"note":string}],',
+    '  "tasks": [{"text":string,"due":string(natural language like "friday" or "5 dec" or null)}],',
+    '  "gratitude": string,',
+    '  "wins": string',
+    '}',
+    'The user\'s habit names are: ' + (habitNames.length ? habitNames.join(', ') : '(none)') + '.',
+    'For "habits", only include names that clearly map to one of those. Match loosely (e.g. "went for a run" → "Run once a week" if present).',
+    'A run mentioned with distance goes in "workouts" as kind:run AND can also tick a running habit.',
+    'Mood words: "great/amazing"=5, "good"=4, "ok/fine"=3, "meh/tired"=2, "awful/terrible"=1.',
+    'If the message is purely reflective/grateful with no metrics, put it in "gratitude".',
+    'If nothing is extractable, return {}.'
+  ].join('\n');
+
+  const out = await claude({
+    maxTokens: 400,
+    temperature: 0,
+    system: system,
+    prompt: 'Message: "' + text + '"\n\nJSON:'
+  });
+  if (!out) return null;
+  // Strip any accidental fences
+  let cleaned = out.trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch (e) {
+    // Try to find the first {...} block
+    const m = cleaned.match(/\{[\s\S]*\}/);
+    if (m) { try { return JSON.parse(m[0]); } catch (e2) { return null; } }
+    return null;
+  }
+}
+
+module.exports = { claude, claudeOr, parseLifeLog, DEFAULT_MODEL };
