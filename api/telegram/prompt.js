@@ -29,9 +29,15 @@ async function sendMorningCheckin(chatId) {
       { text: '🤩', callback_data: 'mood:5' }
     ]
   ];
+  const greetings = [
+    '🌅 Morning. How are you feeling today?',
+    '☀️ New day. What\'s the vibe?',
+    '🌅 Hey, how\'s today landing for you?',
+    '☀️ Morning check-in — pick a face?'
+  ];
   await tg('sendMessage', {
     chat_id: chatId,
-    text: '🌅 Morning. How are you feeling today?',
+    text: greetings[Math.floor(Math.random() * greetings.length)],
     reply_markup: { inline_keyboard: moodButtons }
   });
   return { sent: 'morning' };
@@ -46,15 +52,19 @@ async function sendAnchorPrompt(chatId, anchor) {
     return a === anchor && isHabitDailyDueToday(h, today);
   });
   if (!due.length) return { skipped: 'nothing-due' };
-  const emoji = anchor === 'morning' ? '🌅' : anchor === 'midday' ? '☀️' : '🌙';
-  const label = anchor === 'morning' ? 'morning' : anchor === 'midday' ? 'midday' : 'evening';
   const buttons = due.map(h => [{
     text: '◯ ' + (h.icon ? h.icon + ' ' : '') + h.name,
     callback_data: 'habit:' + h.id
   }]);
+  const messages = {
+    morning: ['🌅 Morning habits — what can we tick off?', '☀️ Time for the morning routine. Tap any:', '🌅 Quick AM check — any of these done?'],
+    midday: ['☀️ Midday check — tap what you\'ve done:', '⏰ Lunchtime habits coming up. Anything ticked?', '☀️ How\'s the day going? Tick what\'s done:'],
+    evening: ['🌙 Evening habits time. Tap to tick:', '🌙 Wind-down list. Anything done already?', '🌙 PM routine — tap any that you\'ve hit:']
+  };
+  const pool = messages[anchor] || messages.morning;
   await tg('sendMessage', {
     chat_id: chatId,
-    text: emoji + ' Time for your ' + label + ' habits. Tap to tick:',
+    text: pool[Math.floor(Math.random() * pool.length)],
     reply_markup: { inline_keyboard: buttons }
   });
   return { sent: 'anchor-' + anchor, count: due.length };
@@ -72,14 +82,26 @@ async function sendWaterPrompt(chatId) {
   const currentMl = Math.round(currentGlasses * glassMl);
   if (currentMl >= targetMl) return { skipped: 'goal-hit' };
   const remaining = targetMl - currentMl;
+  const greetings = [
+    '💧 Water check — ' + currentMl + 'ml so far. ' + remaining + 'ml to go.',
+    '💧 Hydration nudge. Where are you at?',
+    '💧 Quick sip break? You\'re at ' + Math.round((currentMl / targetMl) * 100) + '%.',
+    '💧 ' + remaining + 'ml left to hit goal. Add what you\'ve drunk:'
+  ];
   await tg('sendMessage', {
     chat_id: chatId,
-    text: '💧 Water break. ' + currentMl + ' / ' + targetMl + 'ml so far. ' + remaining + 'ml to go.',
+    text: greetings[Math.floor(Math.random() * greetings.length)],
     reply_markup: { inline_keyboard: [
       [
-        { text: '+250ml', callback_data: 'water:250' },
-        { text: '+500ml', callback_data: 'water:500' },
-        { text: '+750ml', callback_data: 'water:750' }
+        { text: '+ 1 glass', callback_data: 'water:250' },
+        { text: '+ 2 glasses', callback_data: 'water:500' }
+      ],
+      [
+        { text: '+ Bottle (750ml)', callback_data: 'water:750' },
+        { text: '+ 1L', callback_data: 'water:1000' }
+      ],
+      [
+        { text: '🎯 Hit goal', callback_data: 'water:goal' }
       ]
     ] }
   });
@@ -91,37 +113,43 @@ async function sendBedtimeCatchup(chatId) {
   if (!state) return { error: 'no-state' };
   const today = localDateKey();
   const dueDaily = (state.habits || []).filter(h => isHabitDailyDueToday(h, today));
-  // Mood not logged?
-  const m = state.mood && state.mood[today];
-  const lines = [];
-  lines.push('🌙 Before bed catch-up.');
+  const allDaily = (state.habits || []).filter(h => (h.freq || 'daily').toLowerCase() === 'daily');
+  // Send the catch-up first
   if (dueDaily.length) {
-    lines.push('\nUntracked daily habits today:');
-  } else {
-    lines.push('\n✓ All daily habits done — well done.');
-  }
-  const buttons = dueDaily.slice(0, 8).map(h => [{
-    text: '◯ ' + (h.icon ? h.icon + ' ' : '') + h.name,
-    callback_data: 'habit:' + h.id
-  }]);
-  if (dueDaily.length > 8) {
-    lines.push('(showing first 8 of ' + dueDaily.length + ')');
-  }
-  // Send the habits message first
-  if (buttons.length) {
+    const greetings = [
+      '🌙 Before bed catch-up. Anything you forgot to tick?',
+      '🌙 End of day check — tap anything you\'ve done:',
+      '🌙 Quick run-through. Did any of these happen?'
+    ];
+    const buttons = allDaily.map(h => {
+      const done = h.logs && h.logs[today];
+      return [{
+        text: (done ? '✓ ' : '◯ ') + (h.icon ? h.icon + ' ' : '') + h.name,
+        callback_data: 'habit:' + h.id
+      }];
+    });
     await tg('sendMessage', {
       chat_id: chatId,
-      text: lines.join('\n'),
+      text: greetings[Math.floor(Math.random() * greetings.length)],
       reply_markup: { inline_keyboard: buttons }
     });
   } else {
-    await tg('sendMessage', { chat_id: chatId, text: lines.join('\n') });
+    await tg('sendMessage', {
+      chat_id: chatId,
+      text: '🌙 Big day. All daily habits done. Sleep well.'
+    });
   }
-  // Then the gratitude prompt — separate so it stands out
+  // Then the gratitude reflection
+  const reflections = [
+    '🙏 Before you sleep — what\'s one thing from today you\'re grateful for?',
+    '🙏 End-of-day reflection. Anything stand out?',
+    '🙏 Bedtime gratitude — what made today okay?',
+    '🙏 One moment from today worth holding onto?'
+  ];
   await tg('sendMessage', {
     chat_id: chatId,
-    text: '🙏 End of day reflection — what is one thing you are grateful for today?',
-    reply_markup: { force_reply: true, input_field_placeholder: 'a moment, person, or win…' }
+    text: reflections[Math.floor(Math.random() * reflections.length)],
+    reply_markup: { force_reply: true, input_field_placeholder: 'a moment, person, win…' }
   });
   return { sent: 'bedtime', habitsRemaining: dueDaily.length };
 }
@@ -132,16 +160,21 @@ async function sendWeeklyCheckin(chatId) {
   const today = localDateKey();
   const outstanding = (state.habits || []).filter(h => isHabitWeeklyOutstanding(h, today));
   if (!outstanding.length) {
-    await tg('sendMessage', { chat_id: chatId, text: '🎯 Weekly check-in: all weekly habits hit. Strong week.' });
+    await tg('sendMessage', { chat_id: chatId, text: '🎯 Weekly check-in — all weekly habits hit. Strong week.' });
     return { skipped: 'all-done' };
   }
   const buttons = outstanding.map(h => [{
     text: '◯ ' + (h.icon ? h.icon + ' ' : '') + h.name + ' (' + h.freq + ')',
     callback_data: 'habit:' + h.id
   }]);
+  const greetings = [
+    '📅 Weekly check-in. Anything below you actually did but forgot to tick?',
+    '📅 Saturday review — anything outstanding you can catch up on?',
+    '📅 Quick weekly catch-up. Tap any you\'ve done:'
+  ];
   await tg('sendMessage', {
     chat_id: chatId,
-    text: '📅 Weekly check-in. Anything below you have already done but forgot to tick?',
+    text: greetings[Math.floor(Math.random() * greetings.length)],
     reply_markup: { inline_keyboard: buttons }
   });
   return { sent: 'weekly', count: outstanding.length };
