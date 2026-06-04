@@ -14,7 +14,7 @@ const {
   kvSet
 } = require('./_helpers.js');
 const { claude } = require('./_ai.js');
-const { buildWeekSummary, summaryToLines, detectRut, pickRestartAction } = require('./_digest.js');
+const { buildWeekSummary, summaryToLines, detectRut, pickRestartAction, todaysTraining } = require('./_digest.js');
 
 const SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || 'claude-sonnet-4-6';
 
@@ -54,6 +54,20 @@ async function sendMorningCheckin(chatId) {
       const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - d.getDay());
       return localDateKey(d);
     })();
+
+    // Today's training first — so it leads the brief
+    const train = todaysTraining(state);
+    if (train) {
+      const r = train.row;
+      if (r.session === 'rest') {
+        await tg('sendMessage', { chat_id: chatId, text: '🏃 Today\'s training: Rest day. ' + (r.sub || 'Recover well.') });
+      } else if (train.def) {
+        await tg('sendMessage', { chat_id: chatId, text: '🏋️ Today\'s training: ' + r.label + ' — ' + train.def.exercises + ' exercises' + (r.run ? ', then an easy recovery run' : '') + '. Full session is in the app.' });
+      } else {
+        await tg('sendMessage', { chat_id: chatId, text: '🏃 Today\'s training: ' + r.label + ' — ' + (r.sub || 'see your NRC plan') + '.' });
+      }
+    }
+
     const open = (state.tasks || []).filter(t => !t.done);
     const priorities = open.filter(t => t.weekPriority === wkStart);
     const overdue = open.filter(t => t.dueDate && t.dueDate < todayK && t.weekPriority !== wkStart);

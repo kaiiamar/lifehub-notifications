@@ -187,11 +187,32 @@ function pickRestartAction(state) {
   return { kind: 'water', label: 'log a glass of water' };
 }
 
+// ── TODAY'S TRAINING ──
+// Reads the user's training plan template (Mon→Sun) and returns today's row,
+// e.g. { day, session, label, sub }. Mirrors the web app's todaysTrainingSession.
+const STRENGTH_LIBRARY = {
+  'strength-a': { title: 'Strength A — Lower Body', exercises: 7 },
+  'strength-b': { title: 'Strength B — Upper Body', exercises: 8 }
+};
+
+function todaysTraining(state) {
+  const plan = state && state.trainingPlan;
+  if (!plan || !Array.isArray(plan.template) || !plan.template.length) return null;
+  const todayKey = localDateKey();
+  const d = new Date(todayKey + 'T12:00:00Z');
+  const idx = (d.getUTCDay() + 6) % 7; // Mon=0..Sun=6
+  const row = plan.template[idx];
+  if (!row) return null;
+  const def = STRENGTH_LIBRARY[row.session] || null;
+  return { row: row, def: def };
+}
+
 module.exports = {
   buildWeekSummary,
   summaryToLines,
   detectRut,
   pickRestartAction,
   weekDayKeys,
-  daysAgoKey
+  daysAgoKey,
+  todaysTraining
 };
