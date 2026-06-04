@@ -207,6 +207,49 @@ function todaysTraining(state) {
   return { row: row, def: def };
 }
 
+// ── "Showed up" streak (#5/#6) ──
+function _dayHadActivity(state, dayKey) {
+  if ((state.habits || []).some(function (h) { return h.logs && h.logs[dayKey]; })) return true;
+  if ((state.mood || {})[dayKey] && ((state.mood || {})[dayKey].mood || (state.mood || {})[dayKey].sleep)) return true;
+  if (Number((state.water || {})[dayKey] || 0) > 0) return true;
+  if ((state.tasks || []).some(function (t) { return t.done && t.doneAt === dayKey; })) return true;
+  if ((state.workouts || []).some(function (w) { return w.date === dayKey && (w.type || '').toLowerCase() !== 'rest'; })) return true;
+  if ((((state.metrics || {}).run) || []).some(function (r) { return r.date === dayKey; })) return true;
+  if ((state.gratitude || []).some(function (e) { return e.date === dayKey; })) return true;
+  return false;
+}
+function showUpStreak(state) {
+  var streak = 0;
+  var d = new Date();
+  if (!_dayHadActivity(state, localDateKey(d))) d.setDate(d.getDate() - 1);
+  for (var i = 0; i < 400; i++) {
+    if (_dayHadActivity(state, localDateKey(d))) { streak++; d.setDate(d.getDate() - 1); }
+    else break;
+  }
+  return streak;
+}
+
+// ── "On this day" callback (#8) ──
+// Finds a gratitude/win entry from ~1y, 6mo, 3mo or 1mo ago (in that order).
+function onThisDay(state) {
+  var grats = state.gratitude || [];
+  if (!grats.length) return null;
+  var offsets = [
+    { label: 'A year ago today', days: 365 },
+    { label: 'Six months ago today', days: 182 },
+    { label: 'Three months ago today', days: 91 },
+    { label: 'A month ago today', days: 30 }
+  ];
+  for (var i = 0; i < offsets.length; i++) {
+    var d = new Date();
+    d.setDate(d.getDate() - offsets[i].days);
+    var key = localDateKey(d);
+    var hit = grats.find(function (e) { return e.date === key && (e.gratitude || e.wins); });
+    if (hit) return { label: offsets[i].label, text: hit.gratitude || hit.wins };
+  }
+  return null;
+}
+
 module.exports = {
   buildWeekSummary,
   summaryToLines,
@@ -214,5 +257,7 @@ module.exports = {
   pickRestartAction,
   weekDayKeys,
   daysAgoKey,
-  todaysTraining
+  todaysTraining,
+  showUpStreak,
+  onThisDay
 };

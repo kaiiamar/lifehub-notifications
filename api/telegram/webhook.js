@@ -19,6 +19,18 @@ const {
   clearPending
 } = require('./_helpers.js');
 const { claudeOr, parseLifeLog } = require('./_ai.js');
+const { showUpStreak } = require('./_digest.js');
+
+// Occasionally append the "showed up" streak to a confirmation, so the reward
+// lands at the moment of action (ADHD-friendly). Only when streak >= 3 and ~1
+// in 2 chance so it doesn't get spammy.
+function streakSuffix(state) {
+  try {
+    var s = showUpStreak(state);
+    if (s >= 3 && Math.random() < 0.5) return '\n🔥 ' + s + ' days showing up — keep it rolling.';
+  } catch (e) { /* ignore */ }
+  return '';
+}
 
 // ----- AI reply helpers ----------------------------------------------------
 // Warm, brief acknowledgements for gratitude/wins. Falls back to canned pools
@@ -668,7 +680,9 @@ module.exports = async function handler(req, res) {
 
         // Friendly acknowledgement (small, won't spam if you tap many)
         const tmpl = result.done ? pick(REPLIES.habitTicked) : pick(REPLIES.habitUntiked);
-        await tg('sendMessage', { chat_id: chatId, text: fmtReply(tmpl, { h: result.habit.name }) });
+        let habitMsg = fmtReply(tmpl, { h: result.habit.name });
+        if (result.done) { try { habitMsg += streakSuffix(await loadState()); } catch (e) {} }
+        await tg('sendMessage', { chat_id: chatId, text: habitMsg });
         return res.status(200).json({ ok: true });
       }
 
@@ -737,7 +751,8 @@ module.exports = async function handler(req, res) {
           }
           await tg('sendMessage', {
             chat_id: chatId,
-            text: result.done ? '✓ ' + result.task.text + ' done.' : 'Untiked ' + result.task.text + '.'
+            text: (result.done ? '✓ ' + result.task.text + ' done.' : 'Untiked ' + result.task.text + '.')
+              + (result.done ? streakSuffix(await loadState()) : '')
           });
         }
         return res.status(200).json({ ok: true });

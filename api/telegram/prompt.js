@@ -14,7 +14,7 @@ const {
   kvSet
 } = require('./_helpers.js');
 const { claude } = require('./_ai.js');
-const { buildWeekSummary, summaryToLines, detectRut, pickRestartAction, todaysTraining } = require('./_digest.js');
+const { buildWeekSummary, summaryToLines, detectRut, pickRestartAction, todaysTraining, onThisDay } = require('./_digest.js');
 
 const SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || 'claude-sonnet-4-6';
 
@@ -91,6 +91,14 @@ async function sendMorningCheckin(chatId) {
       lines.push('\nUse /tasks to tick anything off.');
       await tg('sendMessage', { chat_id: chatId, text: lines.join('\n') });
     }
+
+    // "On this day" reflective callback (#8) — occasional, warm
+    try {
+      const otd = onThisDay(state);
+      if (otd && Math.random() < 0.5) {
+        await tg('sendMessage', { chat_id: chatId, text: '📅 ' + otd.label + ', you wrote: "' + otd.text + '"' });
+      }
+    } catch (e) { /* ignore */ }
   }
 
   return { sent: 'morning' };
