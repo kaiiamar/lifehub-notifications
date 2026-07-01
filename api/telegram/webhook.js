@@ -19,7 +19,8 @@ const {
   clearPending
 } = require('./_helpers.js');
 const { claudeOr, parseLifeLog } = require('./_ai.js');
-const { showUpStreak } = require('./_digest.js');
+const { showUpStreak, todaysTraining } = require('./_digest.js');
+const { getToday, getWeek, parsePlannerText, currentWeekKey } = require('./_planner.js');
 
 // Occasionally append the "showed up" streak to a confirmation, so the reward
 // lands at the moment of action (ADHD-friendly). Only when streak >= 3 and ~1
@@ -383,6 +384,184 @@ function findTaskByQuery(state, query) {
   return t || null;
 }
 
+// ----- Planner handlers (daily focus / commitments / intention) ------------
+// A task is "today's focus" when focusDate === today's localDateKey. At most 3
+// tasks may share today's focusDate (R10.1 — the cap is enforced here).
+
+// /focus <text> — select an existing open task as today's focus, or create a
+// new focus task. Rejects the 4th gently.
+async function handleFocusAdd(rawText) {
+  const state = await loadState();
+  if (!state) return { error: 'no-state' };
+  if (!state.tasks) state.tasks = [];
+  const today = localDateKey();
+  const already = state.tasks.filter(t => t.focusDate === today);
+
+  let t = findTaskByQuery(state, rawText);
+  const isAlreadyFocus = t && t.focusDate === today;
+  if (!isAlreadyFocus && already.length >= 3) {
+    return { capped: true, count: already.length };
+  }
+  if (!t) {
+    t = {
+      id: genId(),
+      text: rawText.trim(),
+      done: false,
+      dueDate: null,
+      doneAt: null,
+      createdAt: today,
+      focusDate: today
+    };
+    state.tasks.push(t);
+  } else {
+    t.focusDate = today;
+  }
+  await saveState(state);
+  return { task: t, count: state.tasks.filter(x => x.focusDate === today).length };
+}
+
+// focus:<taskId> — toggle a task's focusDate for today (enforce max 3 when
+// stamping; unstamping is always allowed).
+async function handleFocusToggle(taskId) {
+  const state = await loadState();
+  if (!state) return null;
+  const t = (state.tasks || []).find(x => x.id === taskId);
+  if (!t) return null;
+  const today = localDateKey();
+  if (t.focusDate === today) {
+    delete t.focusDate;
+    await saveState(state);
+    return { task: t, focused: false };
+  }
+  const count = (state.tasks || []).filter(x => x.focusDate === today).length;
+  if (count >= 3) return { task: t, capped: true, count: count };
+  t.focusDate = today;
+  await saveState(state);
+  return { task: t, focused: true, count: count + 1 };
+}
+
+// commit:<id> — tick/untick a scheduled commitment's completion (R11.4:
+// leaving one incomplete is never treated as a failure).
+async function handleCommitToggle(commitId) {
+  const state = await loadState();
+  if (!state) return null;
+  const c = (state.commitments || []).find(x => x.id === commitId);
+  if (!c) return null;
+  c.done = !c.done;
+  await saveState(state);
+  return { commitment: c, done: c.done };
+}
+
+// Apply a parsePlannerText() result: add a task, add a commitment, or set the
+// current week's intention.
+async function applyPlannerCapture(parsed) {
+  const state = await loadState();
+  if (!state) return { error: 'no-state' };
+  const today = localDateKey();
+
+  if (parsed.kind === 'commitment') {
+    if (!state.commitments) state.commitments = [];
+    const c = {
+      id: genId(),
+      text: parsed.text,
+      date: parsed.date || today,
+      start: parsed.start || '',
+      end: parsed.end || '',
+      done: false,
+      createdAt: today
+    };
+    state.commitments.push(c);
+    await saveState(state);
+    return { kind: 'commitment', commitment: c };
+  }
+
+  if (parsed.kind === 'intention') {
+    state.weeklyIntention = { weekKey: currentWeekKey(), text: parsed.text };
+    await saveState(state);
+    return { kind: 'intention', intention: state.weeklyIntention };
+  }
+
+  // Default: a task (dueDate may be null).
+  if (!state.tasks) state.tasks = [];
+  const t = {
+    id: genId(),
+    text: parsed.text,
+    done: false,
+    dueDate: parsed.dueDate || null,
+    doneAt: null,
+    createdAt: today
+  };
+  state.tasks.push(t);
+  await saveState(state);
+  return { kind: 'task', task: t };
+}
+
+// A one-line preview of a parsed planner capture for the confirm card.
+function describePlanner(parsed) {
+  if (parsed.kind === 'commitment') {
+    const when = (parsed.date ? fmtDueRel(parsed.date) : 'today')
+      + (parsed.start ? ' · ' + parsed.start + (parsed.end ? '–' + parsed.end : '') : '');
+    return '📅 Commitment: ' + parsed.text + '\n🕒 ' + when;
+  }
+  if (parsed.kind === 'intention') return '🎯 Weekly intention: ' + parsed.text;
+  return '📝 Task: ' + parsed.text + (parsed.dueDate ? ' · due ' + fmtDueRel(parsed.dueDate) : ' · no due date');
+}
+
+// The confirmation message after a planner capture is saved.
+function plannerSavedMessage(res) {
+  if (!res || res.error) return 'Couldn\'t save that — try again?';
+  if (res.kind === 'commitment') {
+    const c = res.commitment;
+    const when = (c.date ? fmtDueRel(c.date) : 'today') + (c.start ? ' · ' + c.start + (c.end ? '–' + c.end : '') : '');
+    return '📅 Added commitment: ' + c.text + ' (' + when + ')';
+  }
+  if (res.kind === 'intention') return '🎯 Weekly intention set: ' + res.intention.text;
+  const t = res.task;
+  return '✓ Added task: ' + t.text + (t.dueDate ? ' · due ' + fmtDueRel(t.dueDate) : '');
+}
+
+// True when a parse result is "time/date-shaped" enough to pre-empt the
+// free-text logging flow. A bare undated note falls through to parseLifeLog,
+// and multi-clause messages (comma-separated, the app's life-log style e.g.
+// "slept badly, gym done, grateful for the sun") are left to parseLifeLog so
+// existing free-text logging is fully preserved (R2).
+function isDatedPlannerCapture(parsed, rawText) {
+  if (!parsed) return false;
+  if (rawText && rawText.indexOf(',') !== -1) return false;
+  if (parsed.kind === 'commitment' || parsed.kind === 'intention') return true;
+  if (parsed.kind === 'task' && parsed.dueDate) return true;
+  return false;
+}
+
+// Present a confirm-before-save card for a parsed planner capture, reusing the
+// existing pending-token flow. Intentions use the dedicated intent:save
+// callback; tasks/commitments reuse logyes:. Cancel always uses logno:.
+async function sendPlanConfirm(chatId, parsed) {
+  const token = shortToken();
+  await savePending(token, { __planner: parsed });
+  const yesCb = parsed.kind === 'intention' ? ('intent:save:' + token) : ('logyes:' + token);
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text: 'Here\'s what I caught:\n\n' + describePlanner(parsed) + '\n\nSave it?',
+    reply_markup: { inline_keyboard: [[
+      { text: '✓ Save', callback_data: yesCb },
+      { text: '✗ Cancel', callback_data: 'logno:' + token }
+    ]] }
+  });
+}
+
+// Today's training as a single compact line for the bot, or null if none.
+function plannerTrainingLine(state) {
+  const t = todaysTraining(state);
+  if (!t || !t.row) return null;
+  const r = t.row;
+  if (r.session === 'rest') return 'Rest day' + (r.sub ? ' · ' + r.sub : '');
+  if (t.def) return r.label + ' · ' + t.def.exercises + ' exercises';
+  const name = r.label || r.session;
+  if (!name) return null;
+  return name + (r.sub ? ' · ' + r.sub : '');
+}
+
 // ----- Free-text logging (AI) ----------------------------------------------
 // Turn a parsed action object into a human-readable preview + apply function.
 function describeActions(actions, state) {
@@ -572,6 +751,19 @@ function parseTextCommand(text) {
   if (lower === '/tasks' || lower === 'tasks') return { type: 'tasks-list' };
   if (lower === '/task' || lower === 'task') return { type: 'task-prompt' };
   if (lower === '/priorities' || lower === 'priorities') return { type: 'priorities-list' };
+  // Planner
+  if (lower === '/day' || lower === 'day') return { type: 'day' };
+  if (lower === '/week' || lower === 'week') return { type: 'week' };
+  if (lower === '/focus' || lower === 'focus') return { type: 'focus-prompt' };
+  if (lower === '/plan' || lower === 'plan') return { type: 'plan-prompt' };
+
+  // /focus <text> — add/select today's focus task
+  const focusAddMatch = trimmed.match(/^\/?focus\s+(.+)$/i);
+  if (focusAddMatch) return { type: 'focus-add', text: focusAddMatch[1] };
+
+  // /plan <text> — free-text planner capture (task / commitment / intention)
+  const planAddMatch = trimmed.match(/^\/?plan\s+(.+)$/i);
+  if (planAddMatch) return { type: 'plan', text: planAddMatch[1] };
 
   // /task <text> — direct add with optional date parsing
   const taskAddMatch = trimmed.match(/^\/?task\s+(.+)$/i);
@@ -758,20 +950,77 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
-      // ---- Free-text log confirm / cancel ----
-      if (data.startsWith('logyes:')) {
-        const token = data.slice('logyes:'.length);
-        const actions = await loadPending(token);
-        if (!actions) {
+      // ---- Daily focus toggle ----
+      if (data.startsWith('focus:')) {
+        const tid = data.slice('focus:'.length);
+        const result = await handleFocusToggle(tid);
+        if (!result) return res.status(200).json({ ok: true });
+        if (result.capped) {
+          await tg('sendMessage', {
+            chat_id: chatId,
+            text: 'You\'ve already got 3 focus tasks for today — that\'s plenty. Finish one, or tap it again to swap it out.'
+          });
+          return res.status(200).json({ ok: true });
+        }
+        await tg('sendMessage', {
+          chat_id: chatId,
+          text: result.focused
+            ? '🎯 Added to today\'s focus: ' + result.task.text
+            : 'Took ' + result.task.text + ' off today\'s focus.'
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      // ---- Scheduled commitment tick ----
+      if (data.startsWith('commit:')) {
+        const cid = data.slice('commit:'.length);
+        const result = await handleCommitToggle(cid);
+        if (!result) return res.status(200).json({ ok: true });
+        await tg('sendMessage', {
+          chat_id: chatId,
+          text: result.done ? '✓ ' + result.commitment.text + ' done.' : 'Untiked ' + result.commitment.text + '.'
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      // ---- Weekly intention confirm/save ----
+      if (data.startsWith('intent:save')) {
+        const token = data.slice('intent:save:'.length);
+        const pending = await loadPending(token);
+        if (!pending || !pending.__planner) {
           await tg('sendMessage', { chat_id: chatId, text: 'That one expired — send it again?' });
           return res.status(200).json({ ok: true });
         }
-        await applyActions(actions);
+        const saved = await applyPlannerCapture(pending.__planner);
         await clearPending(token);
         try {
           await tg('editMessageReplyMarkup', { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } });
         } catch (e) { /* ignore */ }
-        await tg('sendMessage', { chat_id: chatId, text: 'Saved ✓ All logged.' });
+        await tg('sendMessage', { chat_id: chatId, text: plannerSavedMessage(saved) });
+        return res.status(200).json({ ok: true });
+      }
+
+      // ---- Free-text log confirm / cancel ----
+      if (data.startsWith('logyes:')) {
+        const token = data.slice('logyes:'.length);
+        const pending = await loadPending(token);
+        if (!pending) {
+          await tg('sendMessage', { chat_id: chatId, text: 'That one expired — send it again?' });
+          return res.status(200).json({ ok: true });
+        }
+        let confirmMsg = 'Saved ✓ All logged.';
+        if (pending.__planner) {
+          // Planner capture (task / commitment) — reuse this confirm flow.
+          const saved = await applyPlannerCapture(pending.__planner);
+          confirmMsg = plannerSavedMessage(saved);
+        } else {
+          await applyActions(pending);
+        }
+        await clearPending(token);
+        try {
+          await tg('editMessageReplyMarkup', { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } });
+        } catch (e) { /* ignore */ }
+        await tg('sendMessage', { chat_id: chatId, text: confirmMsg });
         return res.status(200).json({ ok: true });
       }
       if (data.startsWith('logno:')) {
@@ -822,7 +1071,7 @@ module.exports = async function handler(req, res) {
         case 'help':
           await tg('sendMessage', {
             chat_id: chatId,
-            text: '✨ Easiest way: just message me naturally and I\'ll parse it.\n"6h sleep, gym done, feeling good, grateful for the gym session" → I\'ll log all of it after you confirm.\n\nOr precise commands:\n\nTasks:\n• /tasks — see all open tasks\n• /task — I\'ll ask\n• /task <text> by <date> — direct add\n• /priorities — this week\'s priorities\n• /star <task> — toggle priority\n\nLogging:\n• /gratitude · /win — I\'ll ask\n• /water · /mood — buttons\n• /sleep — log hours\n• /today — daily habits with ticks\n• tick <habit name>\n\nDates I understand: today, tomorrow, monday, 5 dec, in 3 days, this week.'
+            text: '✨ Easiest way: just message me naturally and I\'ll parse it.\n"6h sleep, gym done, feeling good, grateful for the gym session" → I\'ll log all of it after you confirm.\n\nOr precise commands:\n\nPlanner:\n• /day — today\'s focus, commitments + training\n• /week — weekly intention + this week\'s tasks\n• /focus <text> — pick a daily focus (up to 3)\n• /plan <text> — capture a task, commitment, or intention\n\nTasks:\n• /tasks — see all open tasks\n• /task — I\'ll ask\n• /task <text> by <date> — direct add\n• /priorities — this week\'s priorities\n• /star <task> — toggle priority\n\nLogging:\n• /gratitude · /win — I\'ll ask\n• /water · /mood — buttons\n• /sleep — log hours\n• /today — daily habits with ticks\n• tick <habit name>\n\nDates I understand: today, tomorrow, monday, 5 dec, in 3 days, this week.'
           });
           return res.status(200).json({ ok: true });
 
@@ -1019,6 +1268,75 @@ module.exports = async function handler(req, res) {
           return res.status(200).json({ ok: true });
         }
 
+        case 'day': {
+          const state = await loadState();
+          if (!state) {
+            await tg('sendMessage', { chat_id: chatId, text: 'Could not load Life Hub data.' });
+            return res.status(200).json({ ok: true });
+          }
+          await sendDayBoard(chatId, state);
+          return res.status(200).json({ ok: true });
+        }
+
+        case 'week': {
+          const state = await loadState();
+          if (!state) {
+            await tg('sendMessage', { chat_id: chatId, text: 'Could not load Life Hub data.' });
+            return res.status(200).json({ ok: true });
+          }
+          await sendWeekBoard(chatId, state);
+          return res.status(200).json({ ok: true });
+        }
+
+        case 'focus-prompt':
+          await tg('sendMessage', {
+            chat_id: chatId,
+            text: '🎯 What\'s today\'s focus? I\'ll add it as one of your 1–3 focus tasks.',
+            reply_markup: { force_reply: true, input_field_placeholder: 'one small task for today' }
+          });
+          return res.status(200).json({ ok: true });
+
+        case 'focus-add': {
+          const result = await handleFocusAdd(cmd.text);
+          if (!result || result.error) {
+            await tg('sendMessage', { chat_id: chatId, text: 'Could not save that.' });
+            return res.status(200).json({ ok: true });
+          }
+          if (result.capped) {
+            await tg('sendMessage', {
+              chat_id: chatId,
+              text: 'You\'ve already got 3 focus tasks for today — that\'s plenty. Finish one first, or swap it in the app.'
+            });
+            return res.status(200).json({ ok: true });
+          }
+          await tg('sendMessage', {
+            chat_id: chatId,
+            text: '🎯 Focus for today (' + result.count + '/3): ' + result.task.text
+          });
+          return res.status(200).json({ ok: true });
+        }
+
+        case 'plan-prompt':
+          await tg('sendMessage', {
+            chat_id: chatId,
+            text: '🧠 What\'s the plan? Tell me a task, a time-blocked commitment, or a weekly intention — e.g. "maths course tuesday 2-4pm", "call the dentist by friday", or "intention: ship the portfolio".',
+            reply_markup: { force_reply: true, input_field_placeholder: 'task, commitment, or intention' }
+          });
+          return res.status(200).json({ ok: true });
+
+        case 'plan': {
+          const parsed = parsePlannerText(cmd.text);
+          if (!parsed) {
+            await tg('sendMessage', {
+              chat_id: chatId,
+              text: 'Couldn\'t quite catch that — try rephrasing, e.g. "gym tomorrow 7am" or "call the dentist by friday".'
+            });
+            return res.status(200).json({ ok: true });
+          }
+          await sendPlanConfirm(chatId, parsed);
+          return res.status(200).json({ ok: true });
+        }
+
         case 'free-text': {
           // Routed reply to a force_reply prompt?
           const replyTo = msg.reply_to_message && msg.reply_to_message.text;
@@ -1043,12 +1361,49 @@ module.exports = async function handler(req, res) {
             await tg('sendMessage', { chat_id: chatId, text: await aiWinReply(text, wnFb) });
             return res.status(200).json({ ok: true });
           }
+          // Planner force_reply replies — checked before the task reply matcher
+          // because that matcher (/what.*task/) also matches the focus prompt.
+          if (replyTo && /today'?s focus|focus tasks?/i.test(replyTo)) {
+            const result = await handleFocusAdd(text);
+            if (result && result.capped) {
+              await tg('sendMessage', {
+                chat_id: chatId,
+                text: 'You\'ve already got 3 focus tasks for today — plenty. Finish one first, or swap it in the app.'
+              });
+            } else if (result && result.task) {
+              await tg('sendMessage', { chat_id: chatId, text: '🎯 Focus for today (' + result.count + '/3): ' + result.task.text });
+            } else {
+              await tg('sendMessage', { chat_id: chatId, text: 'Could not save that.' });
+            }
+            return res.status(200).json({ ok: true });
+          }
+          if (replyTo && /the plan\b|task, a time-blocked/i.test(replyTo)) {
+            const parsed = parsePlannerText(text);
+            if (!parsed) {
+              await tg('sendMessage', {
+                chat_id: chatId,
+                text: 'Couldn\'t quite catch that — try rephrasing, e.g. "gym tomorrow 7am" or "call the dentist by friday".'
+              });
+            } else {
+              await sendPlanConfirm(chatId, parsed);
+            }
+            return res.status(200).json({ ok: true });
+          }
           if (replyTo && /what.*task|book flights|task or/i.test(replyTo)) {
             const task = await handleTaskAdd(text);
             const dueText = task && task.dueDate ? ' · due ' + fmtDueRel(task.dueDate) : ' · no due date';
             await tg('sendMessage', { chat_id: chatId, text: '✓ Added: ' + (task ? task.text : text) + dueText });
             return res.status(200).json({ ok: true });
           }
+
+          // Time/date-shaped free-text → planner capture first (R12.2). A bare
+          // undated note falls through to the existing free-text log flow.
+          const plannerParsed = parsePlannerText(text);
+          if (isDatedPlannerCapture(plannerParsed, text)) {
+            await sendPlanConfirm(chatId, plannerParsed);
+            return res.status(200).json({ ok: true });
+          }
+
           // Default — run it through the AI parser (free-text logging)
           const state = await loadState();
           const habitNames = state ? (state.habits || []).map(h => h.name) : [];
@@ -1115,6 +1470,92 @@ async function sendTodayBoard(chatId, state) {
   if (!m.sleep) lines.push('• Sleep not logged · /sleep');
 
   const buttons = habitButtons(dueDaily, today);
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text: lines.join('\n'),
+    reply_markup: buttons.length ? { inline_keyboard: buttons } : undefined
+  });
+}
+
+// ----- Planner boards ------------------------------------------------------
+// /day — single-screen summary: today's commitments (chronological) + training
+// + daily focus tasks, with tap-to-tick buttons.
+async function sendDayBoard(chatId, state) {
+  const today = localDateKey();
+  const t = getToday(state);
+  const lines = ['📅 Today (' + today + ')'];
+  const buttons = [];
+
+  if (t.commitments.length) {
+    lines.push('');
+    lines.push('🕒 Scheduled');
+    t.commitments.forEach(c => {
+      const when = c.start ? (c.start + (c.end ? '–' + c.end : '') + ' · ') : '';
+      lines.push('• ' + when + c.text + (c.done ? ' ✓' : ''));
+      buttons.push([{ text: (c.done ? '✓ ' : '◯ ') + c.text, callback_data: 'commit:' + c.id }]);
+    });
+  }
+
+  const trainLine = plannerTrainingLine(state);
+  if (trainLine) {
+    lines.push('');
+    lines.push('🏋️ ' + trainLine);
+  }
+
+  lines.push('');
+  if (t.focusTasks.length) {
+    const done = t.focusTasks.filter(x => x.done).length;
+    lines.push('🎯 Daily Focus (' + done + '/' + t.focusTasks.length + ')');
+    t.focusTasks.forEach(x => {
+      buttons.push([{ text: (x.done ? '✓ ' : '◯ ') + x.text, callback_data: 'task:' + x.id }]);
+    });
+    if (done === t.focusTasks.length) lines.push('All focus tasks done — nice and clear.');
+  } else {
+    lines.push('🎯 No focus set yet. Add one with /focus <task>.');
+  }
+
+  if (!t.commitments.length && !trainLine && !t.focusTasks.length) {
+    lines.push('');
+    lines.push('Nothing scheduled. Add a focus with /focus or a plan with /plan.');
+  }
+
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text: lines.join('\n'),
+    reply_markup: buttons.length ? { inline_keyboard: buttons } : undefined
+  });
+}
+
+// /week — weekly intention + this week's flexible tasks, shown separately from
+// fixed-date tasks (R9.3).
+async function sendWeekBoard(chatId, state) {
+  const w = getWeek(state);
+  const lines = ['🗓️ This week'];
+  const buttons = [];
+
+  lines.push('');
+  if (w.intention && w.intention.text) lines.push('🎯 Intention: ' + w.intention.text);
+  else lines.push('🎯 No intention yet. Set one: /plan intention: <your aim>');
+
+  lines.push('');
+  if (w.weeklyTasks.length) {
+    const done = w.weeklyTasks.filter(t => t.done).length;
+    lines.push('📋 This week\'s tasks (' + done + '/' + w.weeklyTasks.length + ')');
+    w.weeklyTasks.forEach(t => {
+      buttons.push([{ text: (t.done ? '✓ ' : '◯ ') + t.text, callback_data: 'task:' + t.id }]);
+    });
+  } else {
+    lines.push('📋 No weekly tasks yet. Star a task with /star <name> to add one.');
+  }
+
+  if (w.fixedTasks.length) {
+    lines.push('');
+    lines.push('📅 Fixed dates');
+    w.fixedTasks.slice(0, 8).forEach(t => {
+      lines.push('• ' + t.text + ' · ' + fmtDueRel(t.dueDate) + (t.done ? ' ✓' : ''));
+    });
+  }
+
   await tg('sendMessage', {
     chat_id: chatId,
     text: lines.join('\n'),

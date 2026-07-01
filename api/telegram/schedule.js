@@ -7,23 +7,22 @@
 const { Client } = require('@upstash/qstash');
 
 const SCHEDULES = [
-  // 7am — morning mood + sleep check-in
-  { type: 'morning', hour: 7, minute: 0, days: '*' },
-  // Anchor habit prompts during the day
-  { type: 'anchor-morning', hour: 9, minute: 0, days: '*' },
-  { type: 'anchor-midday', hour: 13, minute: 0, days: '*' },
-  { type: 'anchor-evening', hour: 19, minute: 0, days: '*' },
-  // Water (2 reminders per day — trimmed from 4 to free QStash slots)
-  { type: 'water', hour: 12, minute: 0, days: '*' },
-  { type: 'water', hour: 17, minute: 0, days: '*' },
-  // 9pm — bedtime catch-up + gratitude
-  { type: 'bedtime', hour: 21, minute: 0, days: '*' },
-  // Saturday 2pm — weekly habit check-in (cron uses 6 = Saturday)
-  { type: 'weekly', hour: 14, minute: 0, days: '6' },
-  // Sunday 6pm — AI weekly digest (Claude Sonnet reflection)
+  // 8:00 — consolidated morning check-in (mood + training + morning habits)
+  { type: 'morning', hour: 8, minute: 0, days: '*' },
+  // 12:30 — midday check-in
+  { type: 'midday', hour: 12, minute: 30, days: '*' },
+  // 22:00 — evening / bedtime check-in
+  { type: 'evening', hour: 22, minute: 0, days: '*' },
+  // 15:00 — water reminder
+  { type: 'water', hour: 15, minute: 0, days: '*' },
+  // Sunday 18:00 — AI weekly digest (Claude Sonnet reflection)
   { type: 'weekly-digest', hour: 18, minute: 0, days: '0' },
-  // Daily 4pm — rut detector (only fires a message if 2+ quiet days)
-  { type: 'rut-check', hour: 16, minute: 0, days: '*' }
+  // Daily 17:00 — rut detector (only fires a message if 2+ quiet days)
+  { type: 'rut-check', hour: 17, minute: 0, days: '*' },
+  // Sunday 09:00 — weekly planning prompt (set weekly intention + tasks)
+  { type: 'plan-week', hour: 9, minute: 0, days: '0' },
+  // 8:05 — daily planning prompt (pick 1–3 daily focus tasks)
+  { type: 'plan-day', hour: 8, minute: 5, days: '*' }
 ];
 
 module.exports = async function handler(req, res) {
