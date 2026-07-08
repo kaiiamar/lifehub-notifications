@@ -4,7 +4,7 @@
 // Uses Claude Sonnet (better reflective writing). Once a month, so cost is low.
 const { claude } = require('./telegram/_ai.js');
 
-const SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || 'claude-sonnet-4-6';
+const SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || 'claude-sonnet-4-5';
 
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
