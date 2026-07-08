@@ -12,6 +12,35 @@ module.exports = async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
+  // ── Mode: task/goal breakdown ──────────────────────────────────────────
+  // POST { breakdown: { title, kind } } → { steps: [ ...micro-steps ] }.
+  // Kept on this endpoint (rather than a new serverless function) to stay
+  // within the Vercel Hobby 12-function cap.
+  const bd = req.body && req.body.breakdown;
+  if (bd && bd.title) {
+    const kind = bd.kind === 'goal' ? 'goal' : 'task';
+    const bdSystem = [
+      'You help someone with ADHD beat activation energy by breaking a', kind,
+      'into the smallest sensible next steps.',
+      'Return 3 to 5 concrete micro-steps, each a single physical action that could be started in under two minutes.',
+      'Each step MUST start with a verb, be under 8 words, and be specific (not "plan" or "think about").',
+      'Order them so the very first step is almost frictionless.',
+      'Return ONLY the steps, one per line, no numbering, no bullets, no preamble. British English.'
+    ].join(' ');
+    const bdOut = await claude({
+      maxTokens: 200,
+      temperature: 0.5,
+      system: bdSystem,
+      prompt: (kind === 'goal' ? 'Goal' : 'Task') + ': "' + String(bd.title).slice(0, 200) + '"\n\nThe micro-steps:'
+    });
+    if (!bdOut) return res.status(200).json({ steps: null });
+    const steps = bdOut.split('\n')
+      .map(function (s) { return s.replace(/^\s*(?:\d+[.)]|[-*•])\s*/, '').trim(); })
+      .filter(function (s) { return s.length > 0; })
+      .slice(0, 5);
+    return res.status(200).json({ steps: steps });
+  }
+
   const stats = (req.body && req.body.stats) || null;
   if (!stats) return res.status(400).json({ error: 'Missing stats' });
 
