@@ -1,13 +1,15 @@
 // Generic prompt sender — called by QStash on schedule.
 // ============================================================
 // Input via POST body: { type: 'morning' | 'midday' | 'evening' | 'water'
-//   | 'weekly' | 'weekly-digest' | 'rut-check' | 'plan-week' | 'plan-day' }
+//   | 'weekly' | 'weekly-review' | 'rut-check' | 'plan-day' }
 //
 // Each type reads current Firestore state and crafts the appropriate prompt.
-// The consolidated morning/midday/evening messages, the reflective weekly
-// digest and the rut nudge are built by the shared tone-enforced composers in
-// _messages.js (one message, one small action, guilt-free by construction).
-// The planner nudges (plan-week / plan-day) use _planner.js for day/week data.
+// The consolidated morning/midday/evening messages, the merged Sunday weekly
+// review (close last week + open this week) and the rut nudge are built by the
+// shared tone-enforced composers in _messages.js (one message, one small
+// action, guilt-free by construction). The morning message now also folds in
+// the daily focus-task picker (was the separate plan-day ping). The remaining
+// planner helper (plan-day) uses _planner.js for day/week data.
 const {
   loadState,
   tg,
@@ -19,7 +21,7 @@ const {
   kvSet
 } = require('./_helpers.js');
 const { detectRut } = require('./_digest.js');
-const { composeMorning, composeMidday, composeEvening, composeWeeklyDigest, composeRutNudge, composeWithFallback } = require('./_messages.js');
+const { composeMorning, composeMidday, composeEvening, composeWeeklyReview, composeRutNudge, composeWithFallback } = require('./_messages.js');
 const { pickOneAction, getToday, getWeek } = require('./_planner.js');
 
 // Send a composed { text, buttons } result through Telegram. Wraps the
@@ -79,19 +81,32 @@ async function sendWaterPrompt(chatId) {
   const state = await loadState();
   const today = localDateKey();
   if (!state) return { error: 'no-state' };
+
+  // Skip if water was logged within the last 2 hours — no point nudging just
+  // after a log. lastWaterLogAt is stamped by the webhook on water:* taps.
+  const lastWater = await kvGet('lastWaterLogAt');
+  if (lastWater && lastWater.at) {
+    const ageMs = Date.now() - Number(lastWater.at);
+    if (ageMs >= 0 && ageMs < 2 * 60 * 60 * 1000) return { skipped: 'recent-water-log', ageMs: ageMs };
+  }
+
   const settings = state.waterSettings || {};
   const glassMl = Number(settings.glassMl || 250);
   const target = Number(settings.target || 8);
   const targetMl = target * glassMl;
   const currentGlasses = Number((state.water || {})[today] || 0);
   const currentMl = Math.round(currentGlasses * glassMl);
-  if (currentMl >= targetMl) return { skipped: 'goal-hit' };
+  // Only nudge when genuinely behind pace: skip if already at/above ~50% of
+  // the daily target by now (on pace — this includes goal already hit).
+  if (currentMl >= targetMl * 0.5) return { skipped: 'on-pace', currentMl: currentMl, targetMl: targetMl };
   const remaining = targetMl - currentMl;
+  const pct = Math.round((currentMl / targetMl) * 100);
+  // Progress-aware: state current progress FIRST, remaining second (1.3).
   const greetings = [
-    '💧 Water check — ' + currentMl + 'ml so far. ' + remaining + 'ml to go.',
-    '💧 Hydration nudge. Where are you at?',
-    '💧 Quick sip break? You\'re at ' + Math.round((currentMl / targetMl) * 100) + '%.',
-    '💧 ' + remaining + 'ml left to hit goal. Add what you\'ve drunk:'
+    '💧 ' + currentMl + 'ml so far — ' + remaining + 'ml to go.',
+    '💧 You\'re at ' + pct + '%. ' + remaining + 'ml left.',
+    '💧 ' + currentMl + 'ml logged today — ' + remaining + 'ml to reach your goal.',
+    '💧 At ' + pct + '% (' + currentMl + 'ml). ' + remaining + 'ml to go.'
   ];
   await tg('sendMessage', {
     chat_id: chatId,
@@ -139,23 +154,17 @@ async function sendWeeklyCheckin(chatId) {
   return { sent: 'weekly', count: outstanding.length };
 }
 
-// ── weekly-digest (R13) ─────────────────────────────────────────────────
-// Reflective Sunday review built by composeWeeklyDigest (Sonnet model). The
-// composer returns TEXT only (no buttons) and handles the fresh-start framing
-// itself when little or no data was logged, so we send it directly. Wrapped
-// in try/catch so a delivery failure is logged as { type, error } (R1.3)
-// rather than throwing.
-async function sendWeeklyDigest(chatId) {
+// ── weekly-review (R13, R9.1) ───────────────────────────────────────────
+// ONE Sunday-morning message merging the reflective digest (close last week)
+// with the week-ahead planning invitation (open this week). Built by
+// composeWeeklyReview (Sonnet model), which returns { text, buttons } — the
+// buttons carry the "Open Today" deep-link. Sent via sendComposed so delivery
+// failures are logged as { type, error } (R1.3) rather than throwing.
+async function sendWeeklyReview(chatId) {
   const state = await loadState();
   if (!state) return { error: 'no-state' };
-  const text = await composeWeeklyDigest(state);
-  try {
-    await tg('sendMessage', { chat_id: chatId, text: text });
-    return { sent: 'weekly-digest' };
-  } catch (error) {
-    console.error('Nudge delivery failed', { type: 'weekly-digest', error: (error && error.message) ? error.message : String(error) });
-    return { error: 'delivery-failed', type: 'weekly-digest' };
-  }
+  const composed = await composeWeeklyReview(state);
+  return await sendComposed(chatId, 'weekly-review', composed);
 }
 
 // ── rut-check (R5.3, R6.3) ──────────────────────────────────────────────
@@ -182,35 +191,6 @@ async function sendRutCheck(chatId) {
   if (result && result.error) return result;
   await kvSet('rutNudge', { date: rut.todayKey }, 60 * 60 * 24 * 7);
   return { sent: 'rut-check', daysQuiet: rut.daysQuiet };
-}
-
-// ── plan-week (R9.1) ────────────────────────────────────────────────────
-// Fires Sunday. Prompts the user to set a small weekly intention for the
-// coming week. Uses getWeek(state) to reflect the current intention when one
-// is already set for this week — in that case it's a gentle, guilt-free
-// invitation to review/update rather than a demand. Weekly-task setting and
-// intention saving happen via the /week and /plan commands (added in the
-// webhook, task 14), so we point the user at those low-friction affordances.
-async function sendPlanWeek(chatId) {
-  const state = await loadState();
-  if (!state) return { error: 'no-state' };
-  const week = getWeek(state);
-
-  const lines = [];
-  if (week.intention && week.intention.text) {
-    lines.push('This week\'s intention: ' + week.intention.text + '.');
-    lines.push('Still the right focus? You can keep it or refresh it whenever you like.');
-    lines.push('To update: send /week, or /plan intention: your new focus.');
-  } else {
-    lines.push('New week — a good moment to pick one small intention to aim for.');
-    if (week.weeklyTasks && week.weeklyTasks.length) {
-      lines.push('You already have ' + week.weeklyTasks.length + ' task(s) lined up for the week.');
-    }
-    lines.push('To set it: send /week, or /plan intention: your focus.');
-  }
-
-  const text = await composeWithFallback(lines.join('\n'));
-  return await sendComposed(chatId, 'plan-week', { text: text, buttons: [] });
 }
 
 // ── plan-day (R10.4, R6.3) ──────────────────────────────────────────────
@@ -304,9 +284,8 @@ module.exports = async function handler(req, res) {
       case 'evening':            result = await sendEveningCheckin(chatId); break;
       case 'water':              result = await sendWaterPrompt(chatId); break;
       case 'weekly':             result = await sendWeeklyCheckin(chatId); break;
-      case 'weekly-digest':      result = await sendWeeklyDigest(chatId); break;
+      case 'weekly-review':      result = await sendWeeklyReview(chatId); break;
       case 'rut-check':          result = await sendRutCheck(chatId); break;
-      case 'plan-week':          result = await sendPlanWeek(chatId); break;
       case 'plan-day':           result = await sendPlanDay(chatId); break;
       default:
         return res.status(400).json({ error: 'Unknown type: ' + type });

@@ -31,7 +31,17 @@ const {
 
 // Sonnet model constant — mirrors prompt.js. Used only for the weekly digest
 // (reflective, once a week). Everything else defaults to Haiku via _ai.js.
-const SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || 'claude-sonnet-4-6';
+const SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || 'claude-sonnet-4-5';
+
+// Public URL of the Life Hub PWA (GitHub Pages). Used for the "Open Today"
+// deep-link button on the morning message and weekly review. Overridable via
+// env; defaults to the published GitHub Pages URL.
+const LIFEHUB_APP_URL = process.env.LIFEHUB_APP_URL || 'https://kaiiamar.github.io/Life-Hub/';
+
+// A single-row "Open Today" URL deep-link button for inline keyboards.
+function openTodayRow() {
+  return [{ text: '📋 Open Today', url: LIFEHUB_APP_URL }];
+}
 
 // ── TONE_RULES ──────────────────────────────────────────────────────────
 // Shared system prompt. Given to Claude when we ask it to rephrase a
@@ -211,6 +221,52 @@ function morningHabitRows(state) {
   });
 }
 
+// Folded-in "plan-day" content: tap-to-pick focus-task buttons for today.
+// Offers candidates only when fewer than 3 focus tasks are already set. This
+// week's flexible tasks come first, then other open tasks — never anything
+// already chosen as today's focus. Uses the focus:<id> callback handled by
+// webhook.js. Returns [] when nothing to offer (already at the 1–3 cap or no
+// open tasks). Capped to 5 rows to keep the morning message light.
+function focusPickRows(state) {
+  const today = localDateKey();
+  const tasks = (state && state.tasks) || [];
+  const focusTasks = tasks.filter(function (t) { return t && t.focusDate === today; });
+  if (focusTasks.length >= 3) return [];
+
+  const already = {};
+  focusTasks.forEach(function (t) { if (t && t.id != null) already[t.id] = true; });
+
+  // This week's flexible tasks first (via _planner.js if available).
+  let weeklyTasks = [];
+  try {
+    const planner = require('./_planner.js');
+    if (planner && typeof planner.getWeek === 'function') {
+      weeklyTasks = planner.getWeek(state).weeklyTasks || [];
+    }
+  } catch (e) { /* _planner optional — fall back to open tasks only */ }
+
+  const seen = {};
+  const candidates = [];
+  function add(t) {
+    if (!t || t.done || t.id == null) return;
+    if (already[t.id] || seen[t.id]) return;
+    seen[t.id] = true;
+    candidates.push(t);
+  }
+  weeklyTasks.forEach(add);
+  tasks.forEach(add);
+
+  return candidates.slice(0, 5).map(function (t) {
+    return [{ text: '◯ ' + t.text, callback_data: 'focus:' + t.id }];
+  });
+}
+
+// Count of focus tasks already stamped for today (for morning line wording).
+function focusSetCount(state) {
+  const today = localDateKey();
+  return ((state && state.tasks) || []).filter(function (t) { return t && t.focusDate === today; }).length;
+}
+
 // Inline fallback action selector, used ONLY when _planner.js is absent and
 // no action was passed in. Deliberately small: real priority logic lives in
 // _planner.js (task 10). Reuses existing callback shapes so buttons work.
@@ -273,20 +329,24 @@ async function composeMorning(state, opts) {
   const training = trainingLine(state);
   const habitRows = morningHabitRows(state);
   const action = resolveAction(state, opts);
+  // Folded-in daily planning (was the separate 8:05 "plan-day" ping).
+  const focusRows = focusPickRows(state);
+  const focusSet = focusSetCount(state);
 
-  const nothingDue = habitRows.length === 0 && !training;
+  const nothingDue = habitRows.length === 0 && !training && focusRows.length === 0;
 
   const buttons = [];
   if (!moodDone) buttons.push(moodButtonRow());
 
-  // R3.4: nothing due and no training → mood prompt only.
+  // R3.4: nothing due, no training and no focus to pick → mood prompt only.
   if (nothingDue) {
     if (moodDone) {
       // Nothing to prompt at all — keep it to a light neutral hello.
       const text = await composeWithFallback('Morning — ' + dateLabel() + '. Nothing scheduled; take it at your pace.', opts);
-      return { text: text, buttons: [] };
+      return { text: text, buttons: [openTodayRow()] };
     }
     const text = await composeWithFallback('Morning — ' + dateLabel() + '. How are you feeling today?', opts);
+    buttons.push(openTodayRow());
     return { text: text, buttons: buttons };
   }
 
@@ -294,11 +354,19 @@ async function composeMorning(state, opts) {
   if (!moodDone) lines.push('How are you feeling today?');
   if (training) lines.push(training);
   if (habitRows.length) lines.push('Morning habits are ready to tick below.');
+  if (focusRows.length) {
+    lines.push(focusSet > 0
+      ? 'Room for more focus today — pick from below.'
+      : 'Pick 1–3 focus tasks for today from below.');
+  }
   if (action) lines.push('One small step: ' + action.label + '.');
 
   habitRows.forEach(function (r) { buttons.push(r); });
+  focusRows.forEach(function (r) { buttons.push(r); });
   const actRow = actionButtonRow(action, buttons);
   if (actRow) buttons.push(actRow);
+  // 1.6 — deep-link to the app as the LAST row.
+  buttons.push(openTodayRow());
 
   const text = await composeWithFallback(lines.join('\n'), opts);
   return { text: text, buttons: buttons };
@@ -381,35 +449,67 @@ async function composeRutNudge(state, opts) {
 // encouraging true fact, names at most one thing that slipped (guilt-free),
 // and ends with exactly one small focus for the week ahead. If little/no
 // data, frames the coming week as a fresh start. Returns text (no buttons).
-async function composeWeeklyDigest(state, opts) {
+// Build the reflective "close last week" deterministic string from the week
+// summary. Returns a rule-compliant string (fresh-start framing when there's
+// no data). The "one to nudge" line has its percentage stripped (1.7) so no
+// score/grade appears in the copy.
+function buildDigestDeterministic(state) {
   const summary = buildWeekSummary(state);
   const lines = summaryToLines(summary);
 
-  let deterministic;
   if (!lines.length) {
     // R13.4 — fresh start, no reference to lack of data as failure.
-    deterministic = 'A fresh week ahead. Pick one small focus to aim for — something you\'d be glad to have done by Sunday.';
-  } else {
-    // Opening: single most encouraging true fact (R13.1).
-    let open;
-    if (summary.strongestHabit) open = 'Strongest this week: ' + summary.strongestHabit + '.';
-    else if (summary.sessionsThisWeek) open = 'You got ' + summary.sessionsThisWeek + ' workouts in this week.';
-    else if (summary.tasksDone) open = 'You completed ' + summary.tasksDone + ' tasks this week.';
-    else if (summary.avgMoodThisWeek != null) open = 'Average mood this week: ' + summary.avgMoodThisWeek + '/5.';
-    else open = 'You showed up this week — that counts.';
-
-    // Optional gentle "one thing to nudge" (R13.2), framed without guilt.
-    let slip = '';
-    if (summary.weakestHabit) slip = ' One to nudge next week: ' + summary.weakestHabit + '.';
-
-    // Closing: exactly one small focus for the week ahead (R13.3).
-    let focus;
-    if (summary.upcomingEvent) focus = ' This week\'s focus: ' + summary.upcomingEvent + '.';
-    else if (summary.weakestHabit) focus = ' This week\'s focus: one more go at ' + summary.weakestHabit.replace(/\s*\(\d+%\)/, '') + '.';
-    else focus = ' This week\'s focus: pick one thing that matters and start small.';
-
-    deterministic = open + slip + focus;
+    return 'A fresh week ahead. Pick one small focus to aim for — something you\'d be glad to have done by Sunday.';
   }
+
+  // Opening: single most encouraging true fact (R13.1).
+  let open;
+  if (summary.strongestHabit) open = 'Strongest this week: ' + summary.strongestHabit + '.';
+  else if (summary.sessionsThisWeek) open = 'You got ' + summary.sessionsThisWeek + ' workouts in this week.';
+  else if (summary.tasksDone) open = 'You completed ' + summary.tasksDone + ' tasks this week.';
+  else if (summary.avgMoodThisWeek != null) open = 'Average mood this week: ' + summary.avgMoodThisWeek + '/5.';
+  else open = 'You showed up this week — that counts.';
+
+  // Optional gentle "one thing to nudge" (R13.2), framed without guilt and
+  // with the percentage stripped (1.7 — no score/grade in the copy).
+  let slip = '';
+  if (summary.weakestHabit) slip = ' One to nudge next week: ' + summary.weakestHabit.replace(/\s*\(\d+%\)/, '') + '.';
+
+  // Closing: exactly one small focus for the week ahead (R13.3).
+  let focus;
+  if (summary.upcomingEvent) focus = ' This week\'s focus: ' + summary.upcomingEvent + '.';
+  else if (summary.weakestHabit) focus = ' This week\'s focus: one more go at ' + summary.weakestHabit.replace(/\s*\(\d+%\)/, '') + '.';
+  else focus = ' This week\'s focus: pick one thing that matters and start small.';
+
+  return open + slip + focus;
+}
+
+// Build the "open this week" planning lines (was the separate Sunday plan-week
+// ping). Reflects the current week's intention when set — a calm invitation to
+// keep or refresh it — otherwise a gentle prompt to pick one small intention.
+function buildWeekAheadDeterministic(state) {
+  let week = { intention: null, weeklyTasks: [] };
+  try {
+    const planner = require('./_planner.js');
+    if (planner && typeof planner.getWeek === 'function') week = planner.getWeek(state);
+  } catch (e) { /* _planner optional */ }
+
+  const lines = [];
+  if (week.intention && week.intention.text) {
+    lines.push('This week\'s intention: ' + week.intention.text + '.');
+    lines.push('Keep it or refresh it whenever you like — send /week, or /plan intention: your focus.');
+  } else {
+    lines.push('A good moment to pick one small intention for the week.');
+    if (week.weeklyTasks && week.weeklyTasks.length) {
+      lines.push('You already have ' + week.weeklyTasks.length + ' task(s) lined up.');
+    }
+    lines.push('To set it: send /week, or /plan intention: your focus.');
+  }
+  return lines.join('\n');
+}
+
+async function composeWeeklyDigest(state, opts) {
+  const deterministic = buildDigestDeterministic(state);
 
   // Weekly digest uses the Sonnet model (reflective, once a week).
   const digestOpts = Object.assign({}, opts, {
@@ -420,6 +520,25 @@ async function composeWeeklyDigest(state, opts) {
   return await composeWithFallback(deterministic, digestOpts);
 }
 
+// ── composeWeeklyReview (Sunday merge) ──────────────────────────────────
+// ONE Sunday-morning message that closes last week and opens this week:
+// the reflective digest (close) + the week-ahead planning invitation (open),
+// composed together, calm and guilt-free. Returns { text, buttons } with the
+// "Open Today" deep-link as the last (only) button row.
+async function composeWeeklyReview(state, opts) {
+  const reflection = buildDigestDeterministic(state);
+  const weekAhead = buildWeekAheadDeterministic(state);
+  const deterministic = 'Last week\n' + reflection + '\n\nThis week\n' + weekAhead;
+
+  const digestOpts = Object.assign({}, opts, {
+    model: (opts && opts.model) || SONNET_MODEL,
+    maxTokens: (opts && opts.maxTokens) || 300,
+    temperature: (opts && typeof opts.temperature === 'number') ? opts.temperature : 0.7
+  });
+  const text = await composeWithFallback(deterministic, digestOpts);
+  return { text: text, buttons: [openTodayRow()] };
+}
+
 module.exports = {
   TONE_RULES,
   sanitizeGuilt,
@@ -428,5 +547,6 @@ module.exports = {
   composeMidday,
   composeEvening,
   composeRutNudge,
-  composeWeeklyDigest
+  composeWeeklyDigest,
+  composeWeeklyReview
 };

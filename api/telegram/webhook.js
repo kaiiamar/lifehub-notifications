@@ -16,7 +16,8 @@ const {
   isHabitDailyDueToday,
   savePending,
   loadPending,
-  clearPending
+  clearPending,
+  kvSet
 } = require('./_helpers.js');
 const { claudeOr, parseLifeLog } = require('./_ai.js');
 const { showUpStreak, todaysTraining } = require('./_digest.js');
@@ -28,7 +29,8 @@ const { getToday, getWeek, parsePlannerText, currentWeekKey } = require('./_plan
 function streakSuffix(state) {
   try {
     var s = showUpStreak(state);
-    if (s >= 3 && Math.random() < 0.5) return '\n🔥 ' + s + ' days showing up — keep it rolling.';
+    // Pure positive — no continuation demand, no loss-aversion framing.
+    if (s >= 3 && Math.random() < 0.5) return '\n' + s + ' days showing up.';
   } catch (e) { /* ignore */ }
   return '';
 }
@@ -61,11 +63,11 @@ function pick(list) { return list[Math.floor(Math.random() * list.length)]; }
 
 const REPLIES = {
   habitTicked: [
-    'Nice. {h} ticked off ✓',
-    '{h} done — that\'s one off the list.',
+    '{h} ✓',
+    '{h} logged.',
+    'Done — {h}.',
     'Got it, {h} logged.',
-    '{h} ✓ — keep going.',
-    'Boom. {h} is yours.'
+    'Nice. {h} ticked off ✓'
   ],
   habitUntiked: [
     '{h} unticked.',
@@ -76,12 +78,12 @@ const REPLIES = {
     2: ['Logged {e}. Hope it lifts.', '{e} noted. One small win today might shift things.'],
     3: ['Solid middle. {e} logged.', 'Steady-as-she-goes mood {e} ✓'],
     4: ['Love that. {e} logged ✓', '{e} — good day energy.', 'Logged {e}. Stay in it.'],
-    5: ['Yes! Glow day {e} 🎉', '{e} — riding high. Logged.', 'Top-tier energy. {e} ✓']
+    5: ['{e} logged — good day.', '{e} ✓']
   },
   sleepLogged: [
-    '{n}h sleep ✓ — that\'ll do.',
-    'Got {n}h. Hope it was decent.',
-    '{n}h logged. Now go drink some water.'
+    '{n}h logged.',
+    'Sleep: {n}h ✓',
+    '{n}h noted.'
   ],
   waterAdded: [
     '+{ml}ml. You\'re at {pct}% today 💧',
@@ -89,9 +91,8 @@ const REPLIES = {
     'Logged {ml}ml. {pct}% there 💧'
   ],
   waterGoalHit: [
-    'Goal hit! 💧 You\'re fully hydrated today — beautiful.',
-    'Full hydration unlocked 🎉 You\'ve smashed your water goal.',
-    'That\'s the daily target ✓ Bonus glasses from here.'
+    'Water goal hit ✓ — {ml}ml today.',
+    'Water goal reached — {ml}ml today ✓'
   ],
   gratitudeLogged: [
     '🙏 Captured that — "{x}"',
@@ -116,6 +117,21 @@ function fmtReply(template, vars) {
   let out = template;
   Object.keys(vars || {}).forEach(k => { out = out.split('{' + k + '}').join(vars[k]); });
   return out;
+}
+
+// Sleep confirmation — facts first. State-aware: if a training session is
+// scheduled today (not a rest day) and sleep was short (< 6h), append a
+// SUPPORTIVE adjustment, never a judgement.
+function sleepReply(n, state) {
+  let msg = fmtReply(pick(REPLIES.sleepLogged), { n: n });
+  try {
+    const t = todaysTraining(state);
+    const trainingToday = t && t.row && t.row.session !== 'rest';
+    if (trainingToday && Number(n) < 6) {
+      msg += '\nLighter session is a fine call on ' + n + 'h if you need it.';
+    }
+  } catch (e) { /* ignore */ }
+  return msg;
 }
 
 // ----- Action handlers -----------------------------------------------------
@@ -902,16 +918,20 @@ module.exports = async function handler(req, res) {
       // ---- Water tap ----
       if (data.startsWith('water:')) {
         const slug = data.slice('water:'.length);
+        // Remember when water was last logged so the scheduled water prompt can
+        // skip nudging if the user just logged (checked in prompt.js). TTL 24h.
+        try { await kvSet('lastWaterLogAt', { at: Date.now() }, 60 * 60 * 24); } catch (e) { /* ignore */ }
         if (slug === 'goal') {
           // Set water to target glasses
           const state = await loadState();
           if (!state) return res.status(200).json({ ok: true });
           if (!state.waterSettings) state.waterSettings = {};
           const target = Number(state.waterSettings.target || 8);
+          const glassMl = Number(state.waterSettings.glassMl || 250);
           if (!state.water) state.water = {};
           state.water[localDateKey()] = target;
           await saveState(state);
-          await tg('sendMessage', { chat_id: chatId, text: pick(REPLIES.waterGoalHit) });
+          await tg('sendMessage', { chat_id: chatId, text: fmtReply(pick(REPLIES.waterGoalHit), { ml: target * glassMl }) });
         } else if (slug === '0') {
           await handleWaterReset();
           await tg('sendMessage', { chat_id: chatId, text: 'Water reset for today.' });
@@ -921,7 +941,7 @@ module.exports = async function handler(req, res) {
           if (result) {
             const pct = Math.min(100, Math.round((result.ml / result.targetMl) * 100));
             const text = result.justHitGoal
-              ? pick(REPLIES.waterGoalHit)
+              ? fmtReply(pick(REPLIES.waterGoalHit), { ml: result.ml })
               : fmtReply(pick(REPLIES.waterAdded), { ml: ml, pct: pct });
             await tg('sendMessage', { chat_id: chatId, text: text });
           }
@@ -1148,7 +1168,8 @@ module.exports = async function handler(req, res) {
 
         case 'sleep': {
           await handleSleep(cmd.value);
-          await tg('sendMessage', { chat_id: chatId, text: fmtReply(pick(REPLIES.sleepLogged), { n: cmd.value }) });
+          const sState = await loadState();
+          await tg('sendMessage', { chat_id: chatId, text: sleepReply(cmd.value, sState) });
           return res.status(200).json({ ok: true });
         }
 
@@ -1157,7 +1178,7 @@ module.exports = async function handler(req, res) {
           if (result) {
             const pct = Math.min(100, Math.round((result.ml / result.targetMl) * 100));
             const text = result.justHitGoal
-              ? pick(REPLIES.waterGoalHit)
+              ? fmtReply(pick(REPLIES.waterGoalHit), { ml: result.ml })
               : fmtReply(pick(REPLIES.waterAdded), { ml: cmd.value, pct: pct });
             await tg('sendMessage', { chat_id: chatId, text: text });
           }
@@ -1345,7 +1366,8 @@ module.exports = async function handler(req, res) {
             const num = parseFloat(text);
             if (!isNaN(num)) {
               await handleSleep(num);
-              await tg('sendMessage', { chat_id: chatId, text: fmtReply(pick(REPLIES.sleepLogged), { n: num }) });
+              const slState = await loadState();
+              await tg('sendMessage', { chat_id: chatId, text: sleepReply(num, slState) });
               return res.status(200).json({ ok: true });
             }
           }

@@ -7,22 +7,22 @@
 const { Client } = require('@upstash/qstash');
 
 const SCHEDULES = [
-  // 8:00 — consolidated morning check-in (mood + training + morning habits)
+  // 8:00 — consolidated morning check-in (mood + training + morning habits +
+  // daily focus-task picker, folded in from the old 8:05 plan-day ping)
   { type: 'morning', hour: 8, minute: 0, days: '*' },
   // 12:30 — midday check-in
   { type: 'midday', hour: 12, minute: 30, days: '*' },
   // 22:00 — evening / bedtime check-in
   { type: 'evening', hour: 22, minute: 0, days: '*' },
-  // 15:00 — water reminder
+  // 15:00 — water reminder (skips when on pace / recently logged)
   { type: 'water', hour: 15, minute: 0, days: '*' },
-  // Sunday 18:00 — AI weekly digest (Claude Sonnet reflection)
-  { type: 'weekly-digest', hour: 18, minute: 0, days: '0' },
   // Daily 17:00 — rut detector (only fires a message if 2+ quiet days)
   { type: 'rut-check', hour: 17, minute: 0, days: '*' },
-  // Sunday 09:00 — weekly planning prompt (set weekly intention + tasks)
-  { type: 'plan-week', hour: 9, minute: 0, days: '0' },
-  // 8:05 — daily planning prompt (pick 1–3 daily focus tasks)
-  { type: 'plan-day', hour: 8, minute: 5, days: '*' }
+  // Sunday 09:00 — single weekly review: close last week + open this week
+  // (merges the old Sunday 18:00 digest and Sunday 09:00 planning prompts).
+  { type: 'weekly-review', hour: 9, minute: 0, days: '0' }
+  // Note: the daily 8:05 "plan-day" ping is now folded into the 8:00 morning
+  // message (focus-task picker), so it no longer has its own schedule entry.
 ];
 
 module.exports = async function handler(req, res) {
