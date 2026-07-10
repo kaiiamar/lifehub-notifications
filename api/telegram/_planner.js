@@ -30,12 +30,25 @@ function currentWeekKey() {
 }
 
 // Today's scheduled commitments, sorted chronologically by start time (R11.2).
+// Parity with the frontend getTodayCommitments (js/planner.js): matches exact-
+// date commitments AND weekly-recurring ones (recur==='weekly') that fall on
+// the same weekday on/after their start date. Returns lightweight view objects
+// with a per-occurrence `done` so recurring commitments report the right state
+// for the requested day. (Part 5.5)
 function todayCommitments(state, dateKey) {
   const key = dateKey || localDateKey();
-  return (state && state.commitments || [])
-    .filter(function (c) { return c && c.date === key; })
-    .slice()
-    .sort(function (a, b) { return String(a.start || '').localeCompare(String(b.start || '')); });
+  const keyDow = new Date(key + 'T12:00:00').getDay();
+  const out = [];
+  (state && state.commitments || []).forEach(function (c) {
+    if (!c) return;
+    let matches = false;
+    if (c.date === key) matches = true;
+    else if (c.recur === 'weekly' && c.date && key >= c.date && new Date(c.date + 'T12:00:00').getDay() === keyDow) matches = true;
+    if (!matches) return;
+    const done = (c.recur === 'weekly') ? !!(c.doneDates && c.doneDates[key]) : !!c.done;
+    out.push({ id: c.id, text: c.text, start: c.start || '', end: c.end || '', recur: c.recur || null, done: done });
+  });
+  return out.sort(function (a, b) { return String(a.start || '').localeCompare(String(b.start || '')); });
 }
 
 function moodLoggedToday(state) {
