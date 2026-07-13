@@ -41,6 +41,56 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({ steps: steps });
   }
 
+  // ── Mode: evening sweep one-liner ──────────────────────────────────────
+  // POST { sweep: { habitsDone, habitsTotal, training, waterPct, focusDone,
+  //        focusTotal, showingUp } } → { sweep: "<one sentence>" }.
+  const sw = req.body && req.body.sweep;
+  if (sw) {
+    const parts = [];
+    if (sw.habitsTotal != null) parts.push(sw.habitsDone + '/' + sw.habitsTotal + ' habits');
+    if (sw.training) parts.push(String(sw.training));
+    if (sw.waterPct != null) parts.push('water ' + sw.waterPct + '%');
+    if (sw.focusTotal) parts.push(sw.focusDone + '/' + sw.focusTotal + ' focus tasks');
+    if (sw.showingUp) parts.push(sw.showingUp + ' days showing up');
+    if (!parts.length) return res.status(200).json({ sweep: null });
+    const swSystem = [
+      'You are a calm, grounded coach inside a wellbeing app for someone with ADHD.',
+      'Write ONE short sentence (max 20 words) reflecting how today went, using only the facts given.',
+      'Matter-of-fact and kind, like a steady coach — never cheerful hype.',
+      'NEVER use guilt: no "you missed / failed / behind / should have". Frame any low number neutrally as information.',
+      'No greeting, no emoji, no markdown, no sign-off. British English.'
+    ].join(' ');
+    const swOut = await claude({
+      maxTokens: 60,
+      temperature: 0.6,
+      system: swSystem,
+      prompt: 'Today: ' + parts.join(', ') + '.\n\nThe one-sentence reflection:'
+    });
+    if (!swOut) return res.status(200).json({ sweep: null });
+    return res.status(200).json({ sweep: swOut.trim() });
+  }
+
+  // ── Mode: replan the training week ─────────────────────────────────────
+  // POST { replan: { today, remainingDays:[...], sessions:[{key,desc}] } }
+  // → { replan: { easy, quality, long, note } } with full weekday names.
+  const rp = req.body && req.body.replan;
+  if (rp) {
+    const rpSystem = [
+      'You are a running coach reshuffling the remaining runs of a half-marathon training week.',
+      'Assign each run listed to one of the remaining weekdays provided.',
+      'Rules: never place the quality session and the long run on consecutive days; the long run is the last hard session of the week; leave at least one easy or rest day before the long run; never schedule two hard runs back to back.',
+      'Return ONLY compact JSON with full weekday names, e.g. {"easy":"Monday","quality":"Thursday","long":"Saturday","note":"one short sentence"}.',
+      'Only use days from the remaining list. Omit a run key if it is not in the list to place. British English, no markdown, no preamble.'
+    ].join(' ');
+    const rpPrompt = 'Today is ' + (rp.today || '') + '. Remaining days this week: ' + ((rp.remainingDays || []).join(', ')) + '.\n'
+      + 'Runs to place: ' + ((rp.sessions || []).map(function (s) { return s.key + ' (' + (s.desc || s.label || '') + ')'; }).join('; ')) + '.\n\nThe JSON:';
+    const rpOut = await claude({ maxTokens: 160, temperature: 0.4, system: rpSystem, prompt: rpPrompt });
+    if (!rpOut) return res.status(200).json({ replan: null });
+    let parsed = null;
+    try { const m = rpOut.match(/\{[\s\S]*\}/); if (m) parsed = JSON.parse(m[0]); } catch (e) { parsed = null; }
+    return res.status(200).json({ replan: parsed });
+  }
+
   const stats = (req.body && req.body.stats) || null;
   if (!stats) return res.status(400).json({ error: 'Missing stats' });
 
