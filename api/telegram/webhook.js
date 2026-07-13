@@ -572,6 +572,7 @@ function plannerTrainingLine(state) {
   if (!t || !t.row) return null;
   const r = t.row;
   if (r.session === 'rest') return 'Rest day' + (r.sub ? ' · ' + r.sub : '');
+  if (r.desc) { let s = r.label + ' · ' + r.desc; if (r.detail) s += ' (' + r.detail + ')'; return s; }
   if (t.def) return r.label + ' · ' + t.def.exercises + ' exercises';
   const name = r.label || r.session;
   if (!name) return null;
@@ -1000,6 +1001,24 @@ module.exports = async function handler(req, res) {
           chat_id: chatId,
           text: result.done ? '✓ ' + result.commitment.text + ' done.' : 'Untiked ' + result.commitment.text + '.'
         });
+        return res.status(200).json({ ok: true });
+      }
+
+      // ---- Progress photo / waist check-in tick (HM block, §3.3) ----
+      if (data === 'checkin:photo') {
+        const cstate = await loadState();
+        if (cstate) {
+          if (!cstate.checkins) cstate.checkins = {};
+          cstate.checkins[localDateKey()] = { photo: true, at: new Date().toISOString() };
+          await saveState(cstate);
+        }
+        try {
+          await tg('editMessageReplyMarkup', {
+            chat_id: chatId, message_id: messageId,
+            reply_markup: { inline_keyboard: [[{ text: '📷 Photo logged ✓', callback_data: 'noop' }]] }
+          });
+        } catch (e) { /* ignore */ }
+        await tg('sendMessage', { chat_id: chatId, text: 'Logged — nice one. Same spot next week.' });
         return res.status(200).json({ ok: true });
       }
 

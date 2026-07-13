@@ -195,16 +195,50 @@ const STRENGTH_LIBRARY = {
   'strength-b': { title: 'Strength B — Upper Body', exercises: 8 }
 };
 
+// Resolve which race-block week `key` falls in (block start … race day). Mirror
+// of the web app's resolveHmWeek (js/workouts.js). Returns {week,n,total,
+// daysToRace} or null when outside the block.
+function _resolveHmWeek(block, key) {
+  if (!block || !Array.isArray(block.weeks) || !block.weeks.length) return null;
+  if (key < block.weeks[0].start || key > block.race.date) return null;
+  let wk = null;
+  for (let i = 0; i < block.weeks.length; i++) { if (block.weeks[i].start <= key) wk = block.weeks[i]; else break; }
+  if (!wk) return null;
+  function daysBetween(a, b) { return Math.round((new Date(b + 'T12:00:00Z') - new Date(a + 'T12:00:00Z')) / 86400000); }
+  return { week: wk, n: wk.n, total: block.weeks.length, daysToRace: Math.max(0, daysBetween(key, block.race.date)) };
+}
+
+// Mirror of the web app's todaysTrainingSession (js/workouts.js): overlays the
+// dated HM race block onto the weekly template when in-block, else returns the
+// plain template row. Any change here MUST stay in sync with the frontend.
 function todaysTraining(state) {
   const plan = state && state.trainingPlan;
   if (!plan || !Array.isArray(plan.template) || !plan.template.length) return null;
   const todayKey = localDateKey();
   const d = new Date(todayKey + 'T12:00:00Z');
-  const idx = (d.getUTCDay() + 6) % 7; // Mon=0..Sun=6
-  const row = plan.template[idx];
-  if (!row) return null;
-  const def = STRENGTH_LIBRARY[row.session] || null;
-  return { row: row, def: def };
+  const dow = d.getUTCDay();            // 0 Sun..6 Sat
+  const idx = (dow + 6) % 7;            // Mon=0..Sun=6
+  const base = plan.template[idx];
+  if (!base) return null;
+  const block = plan.raceBlock;
+  const ctx = block ? _resolveHmWeek(block, todayKey) : null;
+  if (!ctx) return { row: base, def: STRENGTH_LIBRARY[base.session] || null };
+  const rd = block.runDays || { easy: 2, quality: 4, long: 0 };
+  const wk = ctx.week;
+  const fuelText = wk.fuel ? 'practise fuelling: gel/sweets ~every 40min' : '';
+  let runType = null;
+  if (dow === rd.long) runType = 'long'; else if (dow === rd.quality) runType = 'quality'; else if (dow === rd.easy) runType = 'easy';
+  const row = { day: base.day, session: base.session, label: base.label, sub: base.sub, run: base.run, desc: '', detail: '', fuelText: '', blockN: ctx.n, blockTotal: ctx.total, daysToRace: ctx.daysToRace, phase: wk.phase };
+  if (todayKey === block.race.date) { row.session = 'run'; row.label = 'RACE DAY'; row.desc = wk.long; row.detail = block.paces.race; row.isRace = true; return { row: row, def: null }; }
+  if (base.session === 'strength-a' || base.session === 'strength-b') {
+    if (runType === 'easy') { row.run = true; row.easyRun = wk.easy; }
+    return { row: row, def: STRENGTH_LIBRARY[base.session] || null };
+  }
+  if (runType === 'long') { row.session = 'run'; row.label = 'Long run'; row.desc = wk.long; row.detail = block.paces.easy; row.fuelText = fuelText; return { row: row, def: null }; }
+  if (runType === 'quality') { row.session = 'run'; row.label = 'Quality session'; row.desc = wk.quality; row.detail = /interval/i.test(wk.quality) ? block.paces.interval : block.paces.tempo; return { row: row, def: null }; }
+  if (runType === 'easy') { row.session = 'run'; row.label = 'Easy run'; row.desc = wk.easy; row.detail = block.paces.easy; return { row: row, def: null }; }
+  row.session = 'rest'; row.label = 'Rest';
+  return { row: row, def: null };
 }
 
 // ── "Showed up" streak (#5/#6) ──

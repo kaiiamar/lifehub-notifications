@@ -202,8 +202,15 @@ function trainingLine(state) {
   if (!t || !t.row) return null;
   const r = t.row;
   if (r.session === 'rest') return 'Training: rest day.';
+  // In-block run session — state the actual prescription + pace (addendum §3.1).
+  if (r.desc) {
+    let line = 'Training: ' + r.label + ' — ' + r.desc;
+    if (r.detail) line += ' (' + r.detail + ')';
+    line += '.';
+    if (r.fuelText) line += ' ' + r.fuelText.charAt(0).toUpperCase() + r.fuelText.slice(1) + '.';
+    return line;
+  }
   if (t.def) return 'Training: ' + r.label + ' (' + t.def.exercises + ' exercises).';
-  // No strength def — need at least a label or session to say something useful.
   const name = r.label || r.session;
   if (!name) return null;
   return 'Training: ' + name + (r.sub ? ' — ' + r.sub : '') + '.';
@@ -525,6 +532,38 @@ async function composeWeeklyDigest(state, opts) {
 // the reflective digest (close) + the week-ahead planning invitation (open),
 // composed together, calm and guilt-free. Returns { text, buttons } with the
 // "Open Today" deep-link as the last (only) button row.
+// HM-block Sunday check-in prompts (addendum §3.3). Only during the block.
+// Returns { lines:'', hasPhoto:false } when off-plan. Facts only — no target or
+// on/off-track commentary. Appended VERBATIM after AI composition so the weight
+// number is never paraphrased.
+function buildBlockCheckinLines(state) {
+  const plan = state && state.trainingPlan;
+  const block = plan && plan.raceBlock;
+  if (!block || !Array.isArray(block.weeks) || !block.weeks.length) return { lines: '', hasPhoto: false };
+  const today = localDateKey();
+  if (today < block.weeks[0].start || today > block.race.date) return { lines: '', hasPhoto: false };
+  const out = ['📷 Progress photo + waist check-in — same spot, same light.'];
+  const weights = ((state.metrics || {}).weight) || [];
+  function windowAvg(startDaysAgo, endDaysAgo) {
+    const acc = [];
+    for (let i = endDaysAgo; i <= startDaysAgo; i++) {
+      const d = new Date(); d.setDate(d.getDate() - i);
+      const key = localDateKey(d);
+      weights.forEach(function (w) { if (w.date === key) acc.push(Number(w.value)); });
+    }
+    if (!acc.length) return null;
+    return Math.round(acc.reduce(function (a, b) { return a + b; }, 0) / acc.length * 10) / 10;
+  }
+  let thisWeekCount = 0;
+  for (let i = 0; i <= 6; i++) { const d = new Date(); d.setDate(d.getDate() - i); const key = localDateKey(d); if (weights.some(function (w) { return w.date === key; })) thisWeekCount++; }
+  if (thisWeekCount >= 3) {
+    const thisAvg = windowAvg(6, 0);
+    const lastAvg = windowAvg(13, 7);
+    if (thisAvg != null) out.push('Weight avg this week: ' + thisAvg + 'kg' + (lastAvg != null ? ' (last week ' + lastAvg + ').' : '.'));
+  }
+  return { lines: out.join('\n'), hasPhoto: true };
+}
+
 async function composeWeeklyReview(state, opts) {
   const reflection = buildDigestDeterministic(state);
   const weekAhead = buildWeekAheadDeterministic(state);
@@ -536,7 +575,12 @@ async function composeWeeklyReview(state, opts) {
     temperature: (opts && typeof opts.temperature === 'number') ? opts.temperature : 0.7
   });
   const text = await composeWithFallback(deterministic, digestOpts);
-  return { text: text, buttons: [openTodayRow()] };
+  // Append the block check-in prompts verbatim so facts stay exact (§3.3).
+  const checkin = buildBlockCheckinLines(state);
+  const finalText = checkin.lines ? (text + '\n\n' + checkin.lines) : text;
+  const buttons = [openTodayRow()];
+  if (checkin.hasPhoto) buttons.unshift([{ text: '📷 Logged my photo', callback_data: 'checkin:photo' }]);
+  return { text: finalText, buttons: buttons };
 }
 
 module.exports = {
