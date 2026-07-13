@@ -234,7 +234,12 @@ function todaysTraining(state) {
     if (runType === 'easy') { row.run = true; row.easyRun = wk.easy; }
     return { row: row, def: STRENGTH_LIBRARY[base.session] || null };
   }
-  if (runType === 'long') { row.session = 'run'; row.label = 'Long run'; row.desc = wk.long; row.detail = block.paces.easy; row.fuelText = fuelText; return { row: row, def: null }; }
+  if (runType === 'long') {
+    // Race week: the long-run slot the day before the race is a shakeout (the
+    // race itself is handled by the isRace branch above).
+    if (wk.phase === 'race week') { row.session = 'run'; row.label = 'Shakeout'; row.desc = '2k easy shakeout or rest — race tomorrow'; row.detail = block.paces.easy; return { row: row, def: null }; }
+    row.session = 'run'; row.label = 'Long run'; row.desc = wk.long; row.detail = block.paces.easy; row.fuelText = fuelText; return { row: row, def: null };
+  }
   if (runType === 'quality') { row.session = 'run'; row.label = 'Quality session'; row.desc = wk.quality; row.detail = /interval/i.test(wk.quality) ? block.paces.interval : block.paces.tempo; return { row: row, def: null }; }
   if (runType === 'easy') { row.session = 'run'; row.label = 'Easy run'; row.desc = wk.easy; row.detail = block.paces.easy; return { row: row, def: null }; }
   row.session = 'rest'; row.label = 'Rest';
