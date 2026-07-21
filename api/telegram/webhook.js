@@ -22,6 +22,7 @@ const {
 const { claudeOr, parseLifeLog } = require('./_ai.js');
 const { showUpStreak, todaysTraining } = require('./_digest.js');
 const { getToday, getWeek, parsePlannerText, currentWeekKey } = require('./_planner.js');
+const { assertBodySize, requireTelegramWebhook } = require('../../lib/security.js');
 
 // Occasionally append the "showed up" streak to a confirmation, so the reward
 // lands at the moment of action (ADHD-friendly). Only when streak >= 3 and ~1
@@ -833,8 +834,9 @@ function timeGreeting() {
 
 // ----- Webhook handler -----------------------------------------------------
 module.exports = async function handler(req, res) {
-  if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (!requireTelegramWebhook(req, res)) return;
+  if (!assertBodySize(req, res, 64 * 1024)) return;
 
   const update = req.body || {};
   const expectedChatId = getChatId();

@@ -1,10 +1,11 @@
 // Register all the Telegram bot prompt schedules with QStash.
 // ============================================================
-// Call: POST /api/telegram/schedule?secret=<TELEGRAM_SETUP_SECRET>
-// Wipes any previously-registered telegram schedules and creates fresh ones.
+// Call with POST and Authorization: Bearer <TELEGRAM_SETUP_SECRET>.
+// Wipes any previously registered Life Hub Telegram schedules and creates fresh ones.
 //
 // All times below are LOCAL — converted to UTC via TZ_OFFSET env var.
 const { Client } = require('@upstash/qstash');
+const { requireServiceBearer } = require('../../lib/security.js');
 
 const SCHEDULES = [
   // 8:00 — consolidated morning check-in (mood + training + morning habits +
@@ -26,10 +27,11 @@ const SCHEDULES = [
 ];
 
 module.exports = async function handler(req, res) {
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  const secret = req.query.secret || (req.body && req.body.secret);
-  if (process.env.TELEGRAM_SETUP_SECRET && secret !== process.env.TELEGRAM_SETUP_SECRET) {
-    return res.status(403).json({ error: 'Forbidden' });
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (!requireServiceBearer(req, res, 'TELEGRAM_SETUP_SECRET')) return;
+  const callbackSecret = process.env.QSTASH_CALLBACK_SECRET;
+  if (!callbackSecret || !process.env.QSTASH_TOKEN) {
+    return res.status(503).json({ error: 'QStash security is not configured' });
   }
 
   const baseUrl = process.env.APP_URL || (process.env.VERCEL_URL ? 'https://' + process.env.VERCEL_URL : '');
@@ -69,7 +71,10 @@ module.exports = async function handler(req, res) {
         destination: baseUrl.replace(/\/$/, '') + '/api/telegram/prompt',
         cron: cron,
         body: JSON.stringify({ type: s.type, __telegram: true }),
-        headers: { 'Content-Type': 'application/json' }
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + callbackSecret
+        }
       });
       created.push({ type: s.type, cron, scheduleId: result.scheduleId });
     } catch (e) {

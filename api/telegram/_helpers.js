@@ -212,6 +212,7 @@ function isHabitWeeklyOutstanding(h, todayKey) {
 }
 
 module.exports = {
+  getFirebaseApp,
   getFirestore,
   loadState,
   saveState,

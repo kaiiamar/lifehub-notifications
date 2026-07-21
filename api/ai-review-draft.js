@@ -3,15 +3,17 @@
 // POST with a month summary; returns draft text for each review prompt.
 // Uses Claude Sonnet (better reflective writing). Once a month, so cost is low.
 const { claude } = require('./telegram/_ai.js');
+const { assertBodySize, enforceRateLimit, handleCors, requireFirebaseUser } = require('../lib/security.js');
 
 const SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || 'claude-sonnet-4-5';
 
 module.exports = async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (!handleCors(req, res, ['POST', 'OPTIONS'])) return;
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (!assertBodySize(req, res, 24 * 1024)) return;
+  const user = await requireFirebaseUser(req, res);
+  if (!user) return;
+  if (!await enforceRateLimit(res, 'ai-review', user.uid, 6, 60 * 60)) return;
 
   const data = (req.body && req.body.summary) || null;
   if (!data) return res.status(400).json({ error: 'Missing summary' });

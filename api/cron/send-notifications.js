@@ -1,69 +1,52 @@
 const { Redis } = require('@upstash/redis');
 const webpush = require('web-push');
-
-webpush.setVapidDetails(
-  process.env.VAPID_EMAIL || 'mailto:[email]',
-  process.env.VAPID_PUBLIC_KEY,
-  process.env.VAPID_PRIVATE_KEY
-);
+const { requireServiceBearer } = require('../../lib/security.js');
 
 module.exports = async function handler(req, res) {
+  if (req.method !== 'GET' && req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (!requireServiceBearer(req, res, 'CRON_SECRET')) return;
+  const userId = process.env.LIFEHUB_FIREBASE_UID;
+  if (!userId) return res.status(503).json({ error: 'LIFEHUB_FIREBASE_UID is not configured' });
+  if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY || !process.env.VAPID_EMAIL) {
+    return res.status(503).json({ error: 'Push notifications are not configured' });
+  }
+
   try {
     const redis = new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN });
+    const remindersRaw = await redis.get('reminders:' + userId);
+    const subRaw = await redis.get('sub:' + userId);
+    if (!remindersRaw || !subRaw) return res.status(200).json({ ok: true, checked: 1, sent: 0 });
+
+    const reminders = typeof remindersRaw === 'string' ? JSON.parse(remindersRaw) : remindersRaw;
+    const subscription = typeof subRaw === 'string' ? JSON.parse(subRaw) : subRaw;
+    const enabled = Array.isArray(reminders) ? reminders.filter(function (item) { return item.enabled; }) : [];
+    if (!enabled.length) return res.status(200).json({ ok: true, checked: 1, sent: 0 });
+
     const today = new Date().toISOString().slice(0, 10);
+    const firedKey = 'fired:' + userId + ':daily:' + today;
+    if (await redis.get(firedKey)) return res.status(200).json({ ok: true, checked: 1, sent: 0 });
 
-    // Scan for all reminder keys
-    const keys = [];
-    let cursor = 0;
-    do {
-      const result = await redis.scan(cursor, { match: 'reminders:*', count: 100 });
-      cursor = result[0];
-      keys.push(...result[1]);
-    } while (cursor !== 0);
-
-    let sent = 0;
-
-    for (const key of keys) {
-      const userId = key.replace('reminders:', '');
-      const remindersRaw = await redis.get(key);
-      if (!remindersRaw) continue;
-
-      const reminders = typeof remindersRaw === 'string' ? JSON.parse(remindersRaw) : remindersRaw;
-      const subRaw = await redis.get(`sub:${userId}`);
-      if (!subRaw) continue;
-
-      const subscription = typeof subRaw === 'string' ? JSON.parse(subRaw) : subRaw;
-      const enabled = reminders.filter(function(r) { return r.enabled; });
-      if (!enabled.length) continue;
-
-      // Send a single daily summary notification
-      const firedKey = `fired:${userId}:daily:${today}`;
-      const alreadyFired = await redis.get(firedKey);
-      if (alreadyFired) continue;
-
-      const lines = enabled.map(function(r) {
-        return r.emoji + ' ' + r.label + ' (' + (r.hour < 10 ? '0' : '') + r.hour + ':' + (r.minute < 10 ? '0' : '') + r.minute + ')';
-      });
-
+    const lines = enabled.map(function (item) {
+      const hour = (item.hour < 10 ? '0' : '') + item.hour;
+      const minute = (item.minute < 10 ? '0' : '') + item.minute;
+      return item.emoji + ' ' + item.label + ' (' + hour + ':' + minute + ')';
+    });
+    webpush.setVapidDetails(process.env.VAPID_EMAIL, process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
+    await webpush.sendNotification(subscription, JSON.stringify({
+      title: '\u2600\uFE0F Good morning!',
+      body: 'Today\'s reminders: ' + enabled.length + '\n' + lines.join(' \u00b7 '),
+      icon: '/Life-Hub/icon-192.jpg'
+    }));
+    await redis.set(firedKey, '1', { ex: 86400 });
+    return res.status(200).json({ ok: true, checked: 1, sent: 1 });
+  } catch (error) {
+    console.error('Cron error:', error.statusCode || error.message);
+    if (error.statusCode === 410 || error.statusCode === 404) {
       try {
-        await webpush.sendNotification(subscription, JSON.stringify({
-          title: '\u2600\uFE0F Good morning!',
-          body: 'Today\'s reminders: ' + enabled.length + '\n' + lines.join(' \u00b7 '),
-          icon: '/icon-192.png'
-        }));
-        await redis.set(firedKey, '1', { ex: 86400 });
-        sent++;
-      } catch (pushErr) {
-        console.error('Push failed for', userId, pushErr.statusCode || pushErr.message);
-        if (pushErr.statusCode === 410 || pushErr.statusCode === 404) {
-          await redis.del(`sub:${userId}`);
-        }
-      }
+        const redis = new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN });
+        await redis.del('sub:' + userId);
+      } catch (cleanupError) { /* Keep the original delivery error. */ }
     }
-
-    res.status(200).json({ ok: true, checked: keys.length, sent: sent });
-  } catch (e) {
-    console.error('Cron error:', e);
-    res.status(500).json({ error: 'Cron failed' });
+    return res.status(500).json({ error: 'Cron failed' });
   }
 };

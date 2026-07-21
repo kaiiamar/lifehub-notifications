@@ -1,16 +1,18 @@
-// AI narrative endpoint — called by the web app's Insights page.
+// AI narrative endpoint — called by the authenticated Life Hub web app.
 // ============================================================
 // POST with a compact stats summary; returns a short 2-3 sentence narrative.
-// Uses Claude Haiku. CORS-open so the static site can call it.
+// Uses Claude Haiku. Firebase auth, origin checks, body limits and rate limits
+// are enforced before any model call.
 const { claude } = require('./telegram/_ai.js');
+const { assertBodySize, enforceRateLimit, handleCors, requireFirebaseUser } = require('../lib/security.js');
 
 module.exports = async function handler(req, res) {
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (!handleCors(req, res, ['POST', 'OPTIONS'])) return;
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (!assertBodySize(req, res, 16 * 1024)) return;
+  const user = await requireFirebaseUser(req, res);
+  if (!user) return;
+  if (!await enforceRateLimit(res, 'ai-narrative', user.uid, 30, 60 * 60)) return;
 
   // ── Mode: task/goal breakdown ──────────────────────────────────────────
   // POST { breakdown: { title, kind } } → { steps: [ ...micro-steps ] }.

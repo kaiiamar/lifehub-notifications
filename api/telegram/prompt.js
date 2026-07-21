@@ -23,6 +23,7 @@ const {
 const { detectRut } = require('./_digest.js');
 const { composeMorning, composeMidday, composeEvening, composeWeeklyReview, composeRutNudge, composeWithFallback } = require('./_messages.js');
 const { pickOneAction, getToday, getWeek } = require('./_planner.js');
+const { assertBodySize, requireServiceBearer } = require('../../lib/security.js');
 
 // Send a composed { text, buttons } result through Telegram. Wraps the
 // sendMessage call in try/catch and logs { type, error } on failure so the
@@ -265,12 +266,11 @@ async function sendPlanDay(chatId) {
 }
 
 module.exports = async function handler(req, res) {
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST' && req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (!requireServiceBearer(req, res, 'QSTASH_CALLBACK_SECRET')) return;
+  if (!assertBodySize(req, res, 1024)) return;
 
-  const type = (req.body && req.body.type) || req.query.type;
+  const type = req.body && req.body.type;
   if (!type) return res.status(400).json({ error: 'Missing type' });
 
   const chatId = getChatId();
