@@ -41,3 +41,29 @@ Generate long independent random values for every `*_SECRET`; never commit them.
 5. Smoke-test authenticated AI, push subscription, Telegram webhook, and one scheduled callback.
 
 The checked-in configuration does not perform live setup, schedule deletion, credential rotation, or Firestore deployment.
+
+## Revisioned state storage
+
+The legacy `users/{LIFEHUB_USER_ID}.state` JSON string is retained unchanged as
+a rollback source. Current data is stored as one document per top-level state
+area at `users/{LIFEHUB_USER_ID}/domains/{domain}`. Each document contains
+`data`, `deleted`, `revision`, `schemaVersion`, `updatedAt`, and `updatedBy`.
+
+Browser and Telegram writes compare the revision they loaded before updating a
+domain. A mismatch never overwrites newer data: the browser asks which version
+to keep, while Telegram throws so the webhook or QStash delivery can retry
+against freshly loaded state. Deletions use tombstones so legacy values cannot
+reappear during migration.
+
+Rollout order:
+
+1. Publish the UID-locked Firestore rule that permits `/users/kai/domains/*`.
+2. Deploy this backend so Telegram reads legacy state plus domain overlays and
+   writes only changed domains.
+3. Deploy frontend cache `v32`; it migrates missing domains without changing
+   the legacy `state` field.
+4. Verify browser sync and one Telegram mutation before relying on domain data.
+
+Rollback can serve an older frontend against the untouched legacy root, but it
+will not include changes made after domain migration. Export a version 2 backup
+before any rollback and do not delete domain documents.

@@ -31,26 +31,111 @@ function getFirestore() {
 }
 
 const USER_ID = process.env.LIFEHUB_USER_ID || 'kai';
+const SCHEMA_VERSION = 2;
+const MAX_DOMAIN_BYTES = 700 * 1024;
+const stateMetadata = new WeakMap();
+
+function serialize(value) {
+  return value === undefined ? undefined : JSON.stringify(value);
+}
 
 async function loadState() {
   const db = getFirestore();
-  const snap = await db.collection('users').doc(USER_ID).get();
-  if (!snap.exists) return null;
-  const data = snap.data();
-  if (!data || !data.state) return null;
-  try {
-    return JSON.parse(data.state);
-  } catch (e) {
-    console.error('State parse failed:', e.message);
-    return null;
+  const userRef = db.collection('users').doc(USER_ID);
+  const [rootSnap, domainsSnap] = await Promise.all([
+    userRef.get(),
+    userRef.collection('domains').get()
+  ]);
+
+  let state = {};
+  if (rootSnap.exists) {
+    const root = rootSnap.data();
+    if (root && root.state) {
+      try {
+        state = typeof root.state === 'string'
+          ? JSON.parse(root.state)
+          : JSON.parse(JSON.stringify(root.state));
+      } catch (e) {
+        console.error('Legacy state parse failed:', e.message);
+      }
+    }
   }
+
+  const revisions = {};
+  domainsSnap.forEach(doc => {
+    const record = doc.data() || {};
+    revisions[doc.id] = Number(record.revision || 0);
+    if (record.deleted) delete state[doc.id];
+    else state[doc.id] = record.data;
+  });
+
+  if (!rootSnap.exists && domainsSnap.empty) return null;
+  const serialized = {};
+  Object.keys(state).forEach(domain => { serialized[domain] = serialize(state[domain]); });
+  stateMetadata.set(state, { revisions, serialized });
+  return state;
 }
 
 async function saveState(state) {
+  const metadata = stateMetadata.get(state);
+  if (!metadata) throw new Error('State must be loaded before it can be saved');
+
+  const domains = new Set([...Object.keys(metadata.serialized), ...Object.keys(state)]);
+  const changes = [];
+  domains.forEach(domain => {
+    const next = serialize(state[domain]);
+    if (next === metadata.serialized[domain]) return;
+    if (!/^[A-Za-z_$][A-Za-z0-9_$-]{0,99}$/.test(domain) || ['__proto__', 'prototype', 'constructor'].includes(domain)) {
+      throw new Error('Invalid state domain: ' + domain);
+    }
+    if (next !== undefined && Buffer.byteLength(next, 'utf8') > MAX_DOMAIN_BYTES) {
+      throw new Error('State domain exceeds 700 KB: ' + domain);
+    }
+    changes.push({ domain, deleted: next === undefined, data: next === undefined ? null : state[domain] });
+  });
+  if (!changes.length) return;
+
   const db = getFirestore();
-  await db.collection('users').doc(USER_ID).set({
-    state: JSON.stringify(state),
-    updatedAt: new Date().toISOString()
+  const userRef = db.collection('users').doc(USER_ID);
+  const nextRevisions = {};
+  await db.runTransaction(async tx => {
+    const snapshots = [];
+    for (const change of changes) {
+      snapshots.push(await tx.get(userRef.collection('domains').doc(change.domain)));
+    }
+    snapshots.forEach((snap, index) => {
+      const change = changes[index];
+      const remoteRevision = snap.exists ? Number((snap.data() || {}).revision || 0) : 0;
+      const expectedRevision = Number(metadata.revisions[change.domain] || 0);
+      if (remoteRevision !== expectedRevision) {
+        const error = new Error('State changed on another client: ' + change.domain);
+        error.code = 'lifehub/revision-conflict';
+        throw error;
+      }
+      nextRevisions[change.domain] = remoteRevision + 1;
+    });
+    changes.forEach(change => {
+      tx.set(userRef.collection('domains').doc(change.domain), {
+        data: change.data,
+        deleted: change.deleted,
+        revision: nextRevisions[change.domain],
+        schemaVersion: SCHEMA_VERSION,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedBy: 'telegram'
+      });
+    });
+    tx.set(userRef, {
+      schemaVersion: SCHEMA_VERSION,
+      domainStorage: true,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedBy: 'telegram'
+    }, { merge: true });
+  });
+
+  changes.forEach(change => {
+    metadata.revisions[change.domain] = nextRevisions[change.domain];
+    if (change.deleted) delete metadata.serialized[change.domain];
+    else metadata.serialized[change.domain] = serialize(change.data);
   });
 }
 

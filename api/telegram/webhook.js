@@ -1488,6 +1488,9 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({ ok: true });
   } catch (e) {
     console.error('Webhook error:', e);
+    if (e && e.code === 'lifehub/revision-conflict') {
+      return res.status(503).json({ ok: false, error: 'state-conflict-retry' });
+    }
     return res.status(200).json({ ok: true, error: e.message });
   }
 };
