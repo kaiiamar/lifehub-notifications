@@ -2,7 +2,7 @@
 // ============================================================
 // POST with a month summary; returns draft text for each review prompt.
 // Uses Claude Sonnet (better reflective writing). Once a month, so cost is low.
-const { claude } = require('./telegram/_ai.js');
+const { claude } = require('../lib/ai.js');
 const { assertBodySize, enforceRateLimit, handleCors, requireFirebaseUser } = require('../lib/security.js');
 
 const SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || 'claude-sonnet-4-5';

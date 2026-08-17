@@ -3,7 +3,7 @@
 // POST with a compact stats summary; returns a short 2-3 sentence narrative.
 // Uses Claude Haiku. Firebase auth, origin checks, body limits and rate limits
 // are enforced before any model call.
-const { claude } = require('./telegram/_ai.js');
+const { claude } = require('../lib/ai.js');
 const { assertBodySize, enforceRateLimit, handleCors, requireFirebaseUser } = require('../lib/security.js');
 
 module.exports = async function handler(req, res) {
