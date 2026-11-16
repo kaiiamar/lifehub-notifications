@@ -30,6 +30,7 @@ Generate long independent random values for every `*_SECRET`; never commit them.
 - Browser endpoints verify a Firebase ID token and bind it to `LIFEHUB_FIREBASE_UID`.
 - Browser CORS is restricted to `APP_ORIGIN`; submitted user IDs are ignored.
 - QStash destinations require `QSTASH_CALLBACK_SECRET`.
+- Reminder schedules use the browser's validated IANA timezone. Stable per-user schedule IDs and Redis occurrence claims prevent duplicate delivery across repeated device setup.
 - Cron endpoints fail closed when their secret is absent.
 - Mutable and AI endpoints enforce request-size and Redis-backed rate limits.
 

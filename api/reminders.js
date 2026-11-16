@@ -1,16 +1,23 @@
+'use strict';
+
+const crypto = require('crypto');
 const { Redis } = require('@upstash/redis');
 const { Client } = require('@upstash/qstash');
 const { assertBodySize, enforceRateLimit, handleCors, requireFirebaseUser } = require('../lib/security.js');
+const { cronForSchedule, localParts, normalizeSchedule, validDateKey, validTimeZone } = require('../lib/reminder-schedule.js');
 
-function validateReminders(input) {
-  if (!Array.isArray(input) || input.length > 20) return null;
+function validateReminders(input, timeZone) {
+  if (!validTimeZone(timeZone) || !Array.isArray(input) || input.length > 20) return null;
   const clean = [];
   for (const item of input) {
     if (!item || typeof item.id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(item.id)) return null;
-    const hour = Number(item.hour);
-    const minute = Number(item.minute);
-    if (!Number.isInteger(hour) || hour < 0 || hour > 23 ||
-        !Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+    const schedule = normalizeSchedule(item.schedule);
+    if (!schedule) return null;
+    const startDate = item.startDate === undefined ? null : item.startDate;
+    const endDate = item.endDate === undefined ? null : item.endDate;
+    if (startDate !== null && !validDateKey(startDate)) return null;
+    if (endDate !== null && !validDateKey(endDate)) return null;
+    if (startDate && endDate && startDate > endDate) return null;
     const label = String(item.label || '').trim();
     const emoji = String(item.emoji || '').trim();
     const message = String(item.message || '').trim();
@@ -20,13 +27,19 @@ function validateReminders(input) {
       label: label,
       emoji: emoji,
       message: message,
-      hour: hour,
-      minute: minute,
       enabled: item.enabled === true,
-      condition: String(item.condition || 'none').slice(0, 32)
+      schedule: schedule,
+      startDate: startDate,
+      endDate: endDate,
+      timeZone: timeZone
     });
   }
   return clean;
+}
+
+function scheduleIdFor(userId, reminderId) {
+  const owner = crypto.createHash('sha256').update(String(userId)).digest('hex').slice(0, 20);
+  return 'lifehub-' + owner + '-' + reminderId;
 }
 
 module.exports = async function handler(req, res) {
@@ -47,7 +60,7 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  const reminders = validateReminders(req.body && req.body.reminders);
+  const reminders = validateReminders(req.body && req.body.reminders, req.body && req.body.timeZone);
   if (!reminders) return res.status(400).json({ error: 'Invalid reminders' });
   const callbackSecret = process.env.QSTASH_CALLBACK_SECRET;
   const baseUrl = process.env.APP_URL || (process.env.VERCEL_URL ? 'https://' + process.env.VERCEL_URL : '');
@@ -67,20 +80,24 @@ module.exports = async function handler(req, res) {
     }
 
     let created = 0;
-    const tzOffset = Number(process.env.TZ_OFFSET || 0);
+    const now = new Date();
     for (const reminder of reminders) {
       if (!reminder.enabled) continue;
-      let utcHour = reminder.hour - tzOffset;
-      if (utcHour < 0) utcHour += 24;
-      if (utcHour >= 24) utcHour -= 24;
+      if (reminder.endDate && localParts(now, reminder.timeZone).dateKey > reminder.endDate) continue;
       await qstash.schedules.create({
         destination: baseUrl.replace(/\/$/, '') + '/api/send-one',
-        cron: reminder.minute + ' ' + utcHour + ' * * *',
+        scheduleId: scheduleIdFor(user.uid, reminder.id),
+        cron: cronForSchedule(reminder.schedule, reminder.timeZone),
         body: JSON.stringify({
           userId: user.uid,
+          id: reminder.id,
           label: reminder.label,
           emoji: reminder.emoji,
-          message: reminder.message
+          message: reminder.message,
+          schedule: reminder.schedule,
+          startDate: reminder.startDate,
+          endDate: reminder.endDate,
+          timeZone: reminder.timeZone
         }),
         headers: {
           'Content-Type': 'application/json',
@@ -97,3 +114,6 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: 'Server error' });
   }
 };
+
+module.exports.scheduleIdFor = scheduleIdFor;
+module.exports.validateReminders = validateReminders;

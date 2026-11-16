@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "generate-vapid": "node scripts/generate-vapid.js"
+    "generate-vapid": "node scripts/generate-vapid.js",
+    "test": "node --test"
   },
   "dependencies": {
     "@upstash/qstash": "^2.10.1",
